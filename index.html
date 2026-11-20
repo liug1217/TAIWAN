@@ -485,39 +485,38 @@ const BUILD = { sedan: B.sedan, taxi: B.taxi, police: B.police, citybus: B.cityb
 window.TWV = { TYPES, build: (name) => BUILD[name](), ledTexture };
 })();
 </script>
-<script>/* 台灣 1:1 — 國道台北段 駕駛模擬
- * 材質與 Blender 版 (scripts/build_freeway_blender.py) 使用相同公式與顏色 (線性色彩空間)。
+<script>/* 台灣 1:1 — 核心: 資料載入、路網、地形查詢
  * 座標: 資料 (x 東, y 北, z 上) 公尺 -> three.js (x, z, -y)
+ * 所有模組共用 window.TW；這個檔案只放「沒有畫面」的東西 (Worker 以外也能單獨測)
  */
 (function () {
 'use strict';
 const T = window.THREE;
-const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
 const setStatus = (s) => { const el = $('loading-msg'); if (el) el.textContent = s; };
+const HOOKS = { tile: [], key: [], minimap: [], frame: [], update: [], init: [], navBias: null, wayColor: null, leader: null, laneFree: null };
 
-// ======================================================================= 資料 (分區載入)
+// ======================================================================= 分區資料
 // tiles/index.json: 全域資訊；tiles/t/*.bin: 地形；tiles/d/*.bin: 路段 + 橋墩 + 建築 (scripts/tile_web.py)
 // 單檔 台灣.html 把分區內嵌成 <script id="tile-d-x_y">；GitHub Pages 版 (index.html) 用到才下載
 function b64buf(str) {
-  const bin = atob(str.trim());
-  const u = new Uint8Array(bin.length);
+  const bin = atob(str.trim()), u = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
   return u.buffer;
 }
 const INDEX = JSON.parse($('tile-index').textContent);
 const TS = INDEX.ts, TC = INDEX.tc, TSTEP = INDEX.step, TN = TC + 3;   // 地形分區含 1 格外框
-const TGI = INDEX.terrain;                                               // 全域地形格點範圍 (J = x / 30, I = y / 30)
-// 直接雙擊開 台灣.html (file://) 時，沒內嵌的分區從 GitHub Pages 下載
+const TGI = INDEX.terrain;                                               // 全域地形格點範圍 (J = x / step, I = y / step)
 const TILE_BASE = (params.get('tiles') || (location.protocol === 'file:' ? 'https://liug1217.github.io/TAIWAN/tiles/' : 'tiles/')).replace(/\/?$/, '/');
 const tkey = (tx, ty) => tx + '_' + ty;
-/** 內嵌的分區直接解碼 (同步)，否則下載 (回傳 Promise) */
+/** 內嵌的分區直接解碼 (同步回傳 ArrayBuffer)，否則下載 (回傳 Promise) */
 function tileBuf(kind, key) {
   const el = document.getElementById('tile-' + kind + '-' + key);
   if (el) { const b = b64buf(el.textContent); el.remove(); return b; }
   return limitedFetch(TILE_BASE + kind + '/' + key + '.bin');
 }
-// 同時最多 8 個下載 (一次要幾十區時，不會塞爆伺服器)
+// 同時最多 8 個下載
 let fetching = 0;
 const fetchQueue = [];
 function limitedFetch(url) {
@@ -531,14 +530,15 @@ function limitedFetch(url) {
   });
 }
 
+// ======================================================================= 路段
 const LANE_W = 3.75;
 const WAYS = [];            // 依載入順序；w.k = 索引，w.gid = 全域編號 (live.json、傳送地點用)
 const GID = new Map();
 const wayByGid = (g) => { const k = GID.get(g); return k == null ? null : WAYS[k]; };
 const ptKey = (x, y) => Math.round(x * 10) + ',' + Math.round(y * 10);
 const PT_INDEX = new Map(); // 座標 -> [[way, idx], ...]
-const RAMP_PENDING = [];     // 還沒接上的匝道 (見 resolveRamps)
-// 空間索引 (路段線段)
+const RAMP_PENDING = [];
+// 空間索引: 40 m 格子 -> [wayIdx, segIdx, ...]
 const CELL = 40;
 const GRID = new Map();
 const cellKey = (cx, cy) => cx * 100003 + cy;
@@ -547,9 +547,9 @@ function indexWay(w) {
     const key = ptKey(w.P[i * 3], w.P[i * 3 + 1]);
     let a = PT_INDEX.get(key); if (!a) PT_INDEX.set(key, a = []); a.push([w.k, i]);
   }
+  const r = w.hw + 2;
   for (let i = 0; i < w.n - 1; i++) {
     const ax = w.P[i * 3], ay = w.P[i * 3 + 1], bx = w.P[i * 3 + 3], by = w.P[i * 3 + 4];
-    const r = w.hw + 2;
     const cx0 = Math.floor((Math.min(ax, bx) - r) / CELL), cx1 = Math.floor((Math.max(ax, bx) + r) / CELL);
     const cy0 = Math.floor((Math.min(ay, by) - r) / CELL), cy1 = Math.floor((Math.max(ay, by) + r) / CELL);
     for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
@@ -567,13 +567,9 @@ function makeWay(w) {
   w.nx = new Float32Array(n); w.ny = new Float32Array(n); w.s = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const a = Math.max(i - 1, 0), b = Math.min(i + 1, n - 1);
-    const dx = w.P[b * 3] - w.P[a * 3], dy = w.P[b * 3 + 1] - w.P[a * 3 + 1];
-    const L = Math.hypot(dx, dy) || 1;
+    const dx = w.P[b * 3] - w.P[a * 3], dy = w.P[b * 3 + 1] - w.P[a * 3 + 1], L = Math.hypot(dx, dy) || 1;
     w.nx[i] = -dy / L; w.ny[i] = dx / L;
-    if (i > 0) {
-      const ex = w.P[i * 3] - w.P[i * 3 - 3], ey = w.P[i * 3 + 1] - w.P[i * 3 - 2], ez = w.P[i * 3 + 2] - w.P[i * 3 - 1];
-      w.s[i] = w.s[i - 1] + Math.hypot(ex, ey, ez);
-    }
+    if (i > 0) w.s[i] = w.s[i - 1] + Math.hypot(w.P[i * 3] - w.P[i * 3 - 3], w.P[i * 3 + 1] - w.P[i * 3 - 2], w.P[i * 3 + 2] - w.P[i * 3 - 1]);
   }
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
   for (let i = 0; i < n; i++) {
@@ -581,12 +577,11 @@ function makeWay(w) {
     if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
   }
   w.bb = [x0 - w.hw, y0 - w.hw, x1 + w.hw, y1 + w.hw];
-  WAYS.push(w);
-  GID.set(w.gid, w.k);
-  indexWay(w);
+  w.len = w.s[n - 1];
+  WAYS.push(w); GID.set(w.gid, w.k); indexWay(w);
   return w;
 }
-/** 高度 Int16 (0.1 m) 解碼: 3276.8 m 以上 (合歡山、雪山) 存的時候會繞回負數，小於 -500 m 的值加 65536 換回來 */
+/** 高度 Int16 (0.1 m): 3276.8 m 以上存的時候會繞回負數，小於 -500 m 的值加 65536 換回來 */
 const Z16 = (v) => (v < -5000 ? v + 65536 : v) * 0.1;
 /** 細節分區 -> 路段 (加入 WAYS)、橋墩、建築。格式見 scripts/tile_web.py pack_detail */
 function ingestDetail(buf) {
@@ -600,7 +595,7 @@ function ingestDetail(buf) {
   const bxy0 = f32(hd.nb * 2), bbase = f32(hd.nb), bh = f32(hd.nb);
   const roff = i16(hd.cnp * 2), rz = i16(hd.cnp), boff = i16(hd.nbv * 2);
   const bcnt = new Uint16Array(buf, o, hd.nb); o += hd.nb * 2;
-  const emask = new Uint8Array(buf, o, hd.np); o += hd.np;   // bit0 左路緣、bit1 右路緣落在別條路面上
+  const emask = new Uint8Array(buf, o, hd.np); o += hd.np;   // bit0 左路緣、bit1 右路緣落在別條路面上、bit2 匝道整段在主線內
   const bcol = new Uint8Array(buf, o, hd.nb);
   const ways = [];
   let p = 0;
@@ -622,15 +617,13 @@ function ingestDetail(buf) {
   p = 0;
   for (let q = 0; q < ncw; q++) {
     const m = hd.cw[q], n = hd.cc[q];
-    // 雙向一般道路 (非巷道) 被標成 1 線道 (OSM lanes=1，例如中壢中山東路一段有一小段): 兩個方向的車道中心只差 1.6 m，
-    // 對向車每台都會擦撞。至少當 2 線道 (每向 1 線)、寬 7.1 m；巷道另有 6 m 下限 (city_web.py)
+    // 雙向一般道路 (非巷道) 被標成 1 線道: 至少當 2 線道 (每向 1 線)、寬 7.1 m，不然對向車會擦撞
     let lanes = m[2], width = m[4];
     if (!m[3] && m[1] <= 4 && lanes < 2) { lanes = 2; width = Math.max(width, 7.1); }
     ways.push(makeWay({ gid: m[0], ref: '', name: m[6], cls: m[1], lanes, oneway: !!m[3], width, bridge: !!m[5], tunnel: false,
       link: m[1] === 6, ls: 0.3, rs: 0.3, maxspeed: 0, city: true, P: cp.subarray(p * 3, (p + n) * 3) }).k);
     p += n;
   }
-  // 建築頂點 (第一點 + 0.1 m 相對座標)
   const bxy = new Float32Array(hd.nbv * 2);
   for (let b = 0, v = 0; b < hd.nb; b++) for (let i = 0; i < bcnt[b]; i++, v++) {
     bxy[v * 2] = bxy0[b * 2] + boff[v * 2] * 0.1; bxy[v * 2 + 1] = bxy0[b * 2 + 1] + boff[v * 2 + 1] * 0.1;
@@ -638,8 +631,8 @@ function ingestDetail(buf) {
   if (hd.ramp) { for (const r of hd.ramp) RAMP_PENDING.push(r); resolveRamps(); }
   return { ways, piers, bld: hd.nb ? { bxy, bbase, bh, bcnt, bcol, nb: hd.nb } : null };
 }
-// 匝道接主線 (scripts/fix_clip.mjs 步驟 0): 匝道端點已移到主線外側，記錄 [匝道 gid, 端點, 在主線哪一側, 主線 gid, 原本重合的主線點]。
-// 兩條路都載入後把它們在路網上接起來 (nextOptions 用 PT_INDEX 找下一段路)，並讓匝道知道要畫槽化區。
+// 匝道接主線 (scripts/fix_clip.mjs): 匝道端點已移到主線外側，記錄 [匝道 gid, 端點, 在主線哪一側, 主線 gid, 原本重合的主線點]。
+// 兩條路都載入後在路網上接起來，並讓匝道知道要畫槽化區
 function resolveRamps() {
   for (let j = RAMP_PENDING.length - 1; j >= 0; j--) {
     const [gid, e, side, mgid, mi] = RAMP_PENDING[j];
@@ -655,7 +648,8 @@ function resolveRamps() {
   }
 }
 
-/** 找 (x,y) 處、高度不高於 zRef+climb 的最高路面。margin: 距路緣保留寬度 */
+/** 找 (x,y) 處、高度不高於 zRef+climb 的最高路面。margin: 距路緣保留寬度。
+ *  國道主線兩側有多鋪的路肩 (w.eL / w.eR，見 setupShoulders)，左右邊界逐點不同 */
 function roadAt(x, y, zRef, margin, climb = 1.3) {
   const a = GRID.get(cellKey(Math.floor(x / CELL), Math.floor(y / CELL)));
   if (!a) return null;
@@ -663,27 +657,30 @@ function roadAt(x, y, zRef, margin, climb = 1.3) {
   for (let q = 0; q < a.length; q += 2) {
     const w = WAYS[a[q]], i = a[q + 1], P = w.P;
     const ax = P[i * 3], ay = P[i * 3 + 1], az = P[i * 3 + 2];
-    const bx = P[i * 3 + 3], by = P[i * 3 + 4], bz = P[i * 3 + 5];
-    const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+    const dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L = Math.hypot(dx, dy);
     if (L < 1e-3) continue;
-    const t = ((x - ax) * dx + (y - ay) * dy) / (L * L);
-    const ext = 1.5 / L;
+    const t = ((x - ax) * dx + (y - ay) * dy) / (L * L), ext = 1.5 / L;
     if (t < -ext || t > 1 + ext) continue;
-    const lat = ((x - ax) * -dy + (y - ay) * dx) / L;
-    const tc = Math.min(Math.max(t, 0), 1);
-    if (w.eL) {   // 國道主線兩側多鋪的路肩
+    const lat = ((x - ax) * -dy + (y - ay) * dx) / L, tc = Math.min(Math.max(t, 0), 1);
+    if (w.eL) {
       if (lat > w.hw + w.eL[i] + (w.eL[i + 1] - w.eL[i]) * tc - margin || -lat > w.hw + w.eR[i] + (w.eR[i + 1] - w.eR[i]) * tc - margin) continue;
     } else if (Math.abs(lat) > w.hw - margin) continue;
-    const z = az + (bz - az) * tc;
+    const z = az + (P[i * 3 + 5] - az) * tc;
     if (z > zRef + climb) continue;
     if (!best || z > best.z) best = { z, w, i, t: tc, lat, tx: dx / L, ty: dy / L };
   }
   return best;
 }
+/** (x, y) 這個 40 m 格子裡有沒有一般道路 (判斷國道旁邊是不是市區用) */
+function cityAt(x, y) {
+  const a = GRID.get(cellKey(Math.floor(x / CELL), Math.floor(y / CELL)));
+  if (a) for (let j = 0; j < a.length; j += 2) { const w = WAYS[a[j]]; if (w && w.city) return true; }
+  return false;
+}
 
+// ======================================================================= 地形
 const TERR = new Map();       // 地形分區 key -> Int16Array (TN x TN, 0.1 m)
 const LCLS = new Map();       // 地形分區 key -> Uint8Array 地表分類 (0 未知 1 水 2 沙 3 砂石 4 濕地 5 都市 6 農田 7 森林 8 草地)
-/** (x,y) 的地表分類 (最近的格點)；沒有資料回 0 */
 function landcoverAt(x, y) {
   const J = Math.round(x / TSTEP), I = Math.round(y / TSTEP), tx = Math.floor(J / TC), ty = Math.floor(I / TC);
   const a = LCLS.get(tkey(tx, ty));
@@ -695,11 +692,176 @@ function terrainAt(x, y) {
   const tx = Math.floor(j / TC), ty = Math.floor(i / TC);
   const a = TERR.get(tkey(tx, ty));
   if (!a) return 0;
-  const lj = j - tx * TC + 1, li = i - ty * TC + 1;
-  const h = (ii, jj) => Z16(a[ii * TN + jj]);
+  const lj = j - tx * TC + 1, li = i - ty * TC + 1, h = (ii, jj) => Z16(a[ii * TN + jj]);
   return (1 - v) * ((1 - u) * h(li, lj) + u * h(li, lj + 1)) + v * ((1 - u) * h(li + 1, lj) + u * h(li + 1, lj + 1));
 }
 
+// ======================================================================= 國道主線路肩
+// 照實際尺寸: 內側黃線到中央護欄面約 2 m、外側白線到外側護欄面 3 m、中央只有一道護欄。
+// 原始資料: 黃線到路面左緣 1.0 m、兩方向路面間距中位數 1.4 m。
+// 路線中心線與 hw 都不動 (接點、匝道、隧道、AI 全部照舊)；車道整體往右移 0.6 m (ls 1.0 → 1.6)，
+// 路面逐點往左 (eL) / 往右 (eR) 多鋪: 右邊補到外側路肩 3 m (旁邊有匝道就縮)；
+// 左邊有對向路面 → 鋪到兩條路面正中間、在那裡放一道共用的護欄；沒有對向 → 多鋪讓內側路肩 2 m、護欄放在新路緣
+const BARRIER_INSET = 0.35, BAR_HALF = 0.32, LS_FWY = 1.6, PAIR_MAX = 3.0;
+const INNER_SH = 2.0, OUTER_SH = 3.0;
+const isFwyMain = (w) => !w.city && !w.trunk && !w.link && w.oneway && w.lanes >= 2;
+/** 第 i 點左右兩側最近的其他路面: 路緣到路緣的間距 gL / gR，左側最近的是不是對向國道主線 */
+function sideProbe(w, i) {
+  const x = w.P[i * 3], y = w.P[i * 3 + 1], z = w.P[i * 3 + 2], nx = w.nx[i], ny = w.ny[i], tx = ny, ty = -nx, R = w.hw + 8;
+  let gL = null, gR = null, oL = null;
+  const seen = new Set();
+  for (let cx = Math.floor((x - R) / CELL); cx <= Math.floor((x + R) / CELL); cx++) for (let cy = Math.floor((y - R) / CELL); cy <= Math.floor((y + R) / CELL); cy++) {
+    const a = GRID.get(cellKey(cx, cy)); if (!a) continue;
+    for (let j = 0; j < a.length; j += 2) {
+      const o = WAYS[a[j]], si = a[j + 1];
+      if (!o || o === w || o.city) continue;
+      const id = a[j] * 100000 + si; if (seen.has(id)) continue; seen.add(id);
+      const ax = o.P[si * 3], ay = o.P[si * 3 + 1], L = Math.hypot(o.P[si * 3 + 3] - ax, o.P[si * 3 + 4] - ay);
+      if (L < 1e-3) continue;
+      const ux = (o.P[si * 3 + 3] - ax) / L, uy = (o.P[si * 3 + 4] - ay) / L, dot = ux * tx + uy * ty;
+      if (Math.abs(dot) < 0.7) continue;   // 交叉的路不算
+      const t = (x - ax) * ux + (y - ay) * uy; if (t < -0.5 || t > L + 0.5) continue;
+      const tc = Math.min(L, Math.max(0, t)), qx = ax + ux * tc, qy = ay + uy * tc;
+      const qz = o.P[si * 3 + 2] + (o.P[si * 3 + 5] - o.P[si * 3 + 2]) * (tc / L);
+      if (Math.abs(qz - z) > 2) continue;   // 上下層不算
+      const lat = (qx - x) * nx + (qy - y) * ny, g = Math.abs(lat) - w.hw - o.hw;
+      if (g > 8 || Math.abs(lat) < 0.5) continue;
+      if (lat > 0) { if (gL == null || g < gL) { gL = g; oL = { o, opp: dot < -0.85 && isFwyMain(o) && !o.tunnel }; } }
+      else if (gR == null || g < gR) gR = g;
+    }
+  }
+  return { gL, gR, oL };
+}
+/** 分區連接完成 (鄰區資料都在) 時呼叫；只用原始 hw 量，跟其他路段設定的先後無關 */
+function setupShoulders(w) {
+  if (w.shoulder !== undefined) return;
+  w.shoulder = false;
+  if (!isFwyMain(w) || params.has('oldshoulder')) return;
+  w.ls = LS_FWY;   // 隧道也一樣 (車道跟洞外對齊)
+  if (w.tunnel) return;
+  const n = w.n, L = w.lanes * LANE_W;
+  // 外側: 白線到護欄面 OUTER_SH；內側 (沒有對向): 黃線到護欄面 INNER_SH
+  const ER_MAX = Math.max(0, OUTER_SH + BARRIER_INSET + BAR_HALF - (w.width - L - LS_FWY));
+  const EL_MAX = Math.max(0, INNER_SH + BARRIER_INSET + BAR_HALF - LS_FWY);
+  const gL = new Array(n), gR = new Array(n), pair = new Uint8Array(n), opp = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    const p = sideProbe(w, i); gL[i] = p.gL; gR[i] = p.gR;
+    if (p.oL && p.oL.opp && p.gL < PAIR_MAX) { pair[i] = 1; opp[i] = p.oL.o; }
+  }
+  for (let i = 1; i < n - 1; i++) if (!pair[i] && pair[i - 1] && pair[i + 1]) { pair[i] = 1; opp[i] = opp[i - 1]; gL[i] = (gL[i - 1] + gL[i + 1]) / 2; }
+  for (let i = 0; i < n; i++) if (pair[i] && !(i > 0 && pair[i - 1]) && !(i < n - 1 && pair[i + 1])) pair[i] = 0;
+  // 平滑視窗在兩端縮小 (端點用原值): 前後兩條路段在接點量到的是同一個位置，才接得上
+  const avg = (arr, i, ok) => { const h = Math.min(3, i, n - 1 - i); let sum = 0, k = 0; for (let j = i - h; j <= i + h; j++) if (ok(j)) { sum += arr[j]; k++; } return k ? sum / k : arr[i]; };
+  const capL = new Float32Array(n), capR = new Float32Array(n), mid = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (pair[i]) mid[i] = avg(gL, i, (j) => pair[j]) / 2;   // 中央護欄中心 = 路緣外 g/2
+    capL[i] = pair[i] ? Math.max(0, mid[i]) : (gL[i] == null ? EL_MAX : Math.min(EL_MAX, Math.max(0, gL[i] / 2 - 0.05)));
+    capR[i] = gR[i] == null ? ER_MAX : Math.min(ER_MAX, Math.max(0, gR[i] - 0.05));
+  }
+  const eL = new Float32Array(n), eR = new Float32Array(n), bc = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    eL[i] = pair[i] ? capL[i] : Math.min(capL[i], avg(capL, i, (j) => !pair[j]));
+    eR[i] = Math.min(capR[i], avg(capR, i, () => true));
+    bc[i] = pair[i] ? w.hw + mid[i] : w.hw + eL[i] - BARRIER_INSET;
+  }
+  Object.assign(w, { shoulder: true, eL, eR, bc, pair, oppL: opp });
+}
+const clampI = (w, i) => Math.min(Math.max(i | 0, 0), w.n - 1);
+/** 門架 / 看板左側立柱位置 (左法向偏移): 國道主線立在中央護欄上 */
+function leftPost(w, i) { setupShoulders(w); return w.bc ? w.bc[clampI(w, i)] : w.hw + 0.6; }
+/** 右側路緣 (含加寬的路肩) */
+function rightEdge(w, i) { setupShoulders(w); return w.hw + (w.eR ? w.eR[clampI(w, i)] : 0); }
+/** 左側路緣 */
+function leftEdge(w, i) { setupShoulders(w); return w.hw + (w.eL ? w.eL[clampI(w, i)] : 0); }
+
+// ======================================================================= 車道 / 路網 (國道、快速道路、一般道路共用)
+/** 行進方向的車道數 (雙向一般道路只算一半) */
+const laneCount = (w) => (w.city && !w.oneway) ? Math.max(1, Math.floor(w.lanes / 2)) : w.lanes;
+/** 車道中心相對路線左法向的偏移。lane 0 = 最內側；雙向一般道路靠行進方向右側 */
+function laneOffDir(w, lane, dir = 1) {
+  const lc = laneCount(w);
+  lane = Math.min(Math.max(lane, 0), lc - 1);
+  if (w.city) {
+    if (!w.oneway) { const off = (lane + 0.5) * (w.width / 2 - 0.3) / lc; return dir > 0 ? -off : off; }
+    return (w.width / 2 - 0.3) - (lane + 0.5) * (w.width - 0.6) / w.lanes;
+  }
+  if (w.link && w.lanes === 1) return 0;
+  return w.hw - w.ls - LANE_W * (lane + 0.5);
+}
+/** 速限: OSM maxspeed，沒有就依道路等級 */
+const speedLimit = (w) => w.maxspeed || (w.city ? (w.cls === 5 ? 30 : 50) : w.trunk ? (w.link ? 50 : 80) : (w.link ? 60 : 100));
+/** 路口 (路段端點) 可以接續的路段。一般道路的點有幾公分誤差: 隔壁格子 20 公分內的點也算 (兩邊至少一條是一般道路) */
+function nodeLinks(w, node) {
+  const x = w.P[node * 3], y = w.P[node * 3 + 1];
+  const own = PT_INDEX.get(ptKey(x, y)) || [];
+  const gx = Math.round(x * 10), gy = Math.round(y * 10);
+  let res = own;
+  for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+    if (!ox && !oy) continue;
+    for (const e of PT_INDEX.get((gx + ox) + ',' + (gy + oy)) || []) {
+      const o = WAYS[e[0]];
+      if (e[0] !== w.k && (o.city || w.city) && Math.hypot(o.P[e[1] * 3] - x, o.P[e[1] * 3 + 1] - y) < 0.2 && !res.some(([k, i]) => k === e[0] && i === e[1])) {
+        if (res === own) res = own.slice();
+        res.push(e);
+      }
+    }
+  }
+  return res;
+}
+function nextOptions(w, node) {
+  const res = [];
+  for (const [k, i] of nodeLinks(w, node)) {
+    if (k === w.k) continue;
+    const o = WAYS[k];
+    if (Math.abs(o.P[i * 3 + 2] - w.P[node * 3 + 2]) > 2.5) continue;   // 不同樓層剛好重疊，不相連
+    if (i < o.n - 1) res.push({ o, i, dir: 1, hx: o.ny[i], hy: -o.nx[i] });
+    if (o.city && !o.oneway && i > 0) res.push({ o, i, dir: -1, hx: -o.ny[i], hy: o.nx[i] });
+  }
+  return res.sort((a, b) => a.o.gid - b.o.gid);   // 依全域編號排序: 選路結果不受分區載入順序影響
+}
+/** 接續選項走到底以後還有沒有路 (一般道路才看，只往前看一層) */
+function deadEndAhead(o) {
+  if (!o.o.city) return false;
+  return nextOptions(o.o, o.dir > 0 ? o.o.n - 1 : 0).length === 0;
+}
+/** 玩家自動駕駛選路: 國道優先同一條主線；一般道路直行，打方向燈就在路口轉彎 */
+function chooseNext(w, node, dir, signal) {
+  const hx = dir > 0 ? w.ny[node] : -w.ny[node], hy = dir > 0 ? -w.nx[node] : w.nx[node];
+  let best = null, bs = -1e9;
+  for (const o of nextOptions(w, node)) {
+    const dot = hx * o.hx + hy * o.hy, cross = hx * o.hy - hy * o.hx;
+    if (dot < (w.city || o.o.city ? -0.2 : 0.3)) continue;
+    let sc = dot * 2 + (o.o.ref && o.o.ref === w.ref ? 3 : 0) + (o.o.link && !w.link ? -2 : 0) + (w.link && !o.o.link ? 2 : 0)
+      + (!!o.o.city !== !!w.city ? -1 : 0) + (o.o.city && o.o.cls === 5 ? -1 : 0);
+    if (deadEndAhead(o)) sc -= 6;
+    if (HOOKS.navBias) sc += HOOKS.navBias(w, o);
+    if (signal < 0 && cross > 0.3) sc += 6;
+    if (signal > 0 && cross < -0.3) sc += 6;
+    if (sc > bs) { bs = sc; best = o; }
+  }
+  if (!best && w.city) {   // 市區只剩急轉出得去: 挑最順的那條
+    let bd = -1e9;
+    for (const o of nextOptions(w, node)) if (o.o.city) { const dot = hx * o.hx + hy * o.hy; if (dot > bd) { bd = dot; best = o; } }
+  }
+  return best;
+}
+const nextWay = (w) => { const o = chooseNext(w, w.n - 1, 1, 0); return o ? [o.o, o.i] : null; };
+
+window.TW = Object.assign(window.TW || {}, {
+  T, params, $, setStatus, HOOKS, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16,
+  LANE_W, WAYS, GID, wayByGid, ptKey, PT_INDEX, CELL, GRID, cellKey, ingestDetail, resolveRamps,
+  roadAt, cityAt, TERR, LCLS, landcoverAt, terrainAt,
+  BARRIER_INSET, BAR_HALF, isFwyMain, setupShoulders, leftPost, rightEdge, leftEdge,
+  laneCount, laneOffDir, speedLimit, nodeLinks, nextOptions, deadEndAhead, chooseNext, nextWay,
+});
+})();
+
+/* 台灣 1:1 — 渲染器、天空、日夜、材質 (移植自 Blender 版公式)
+ * 材質與 Blender 版 (scripts/build_freeway_blender.py) 使用相同公式與顏色 (線性色彩空間)
+ */
+(function () {
+'use strict';
+const { T, $, params, LANE_W } = TW;
 // ======================================================================= 渲染器
 const renderer = new T.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, powerPreference: 'high-performance' });
 // 手機 (觸控裝置) 省電模式: 解析度、陰影降低，建築只畫附近
@@ -1347,279 +1509,307 @@ const TERRAIN_SPEC = {
 };
 const matTerrain = patch(new T.MeshStandardMaterial({ roughness: 0.95, metalness: 0 }), TERRAIN_SPEC);
 
+Object.assign(TW, { renderer, MOBILE, scene, camera, SUN_DIR, NIGHT, WEATHER, sun, smooth01, updateDayNight, cycleTime, GLOW_TEX, GLOW_LAMP, matLampPole, matSoundWall, matSoundGlass, matBillboard, matBillboardBack, matLampHead, patch, matAsphalt, matConcrete, matBarrier, matGore, matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber, matReflR, matReflBlack, matRetro, matRetroGlow, matReflY, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, WATER_T, matWater, TERRAIN_SPEC, matTerrain });
+})();
+
+/* 台灣 1:1 — 建模 (道路、護欄、路邊設施、隧道、橋墩、地形、航照、建築) 與分區串流
+ *
+ * 效能設計 (舊版量到: 每幀 520 萬三角形、690 次繪製、建模與著色器編譯造成 0.2~1.4 秒卡頓):
+ *  - 3.84 km 的分區再切成 480 m 小塊 (SUB)，鏡頭與陰影都能逐塊剔除 (大網格的包圍球太大，等於沒剔除)
+ *  - 依種類決定顯示距離: 路面/護欄/隧道 (base) 全部；防眩板、導桿等 (prop) 1.4 km；反光片等小東西 (fine) 350 m；
+ *    陰影只有玩家附近的小塊投射
+ *  - 地形三級解析度 (30 / 60 / 120 m)，邊緣加裙邊蓋住接縫
+ *  - 建模用產生器分段做，每幀限時 (BUDGET_MS)，不會一次卡住
+ */
+(function () {
+'use strict';
+const { T, params, setStatus, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16, WAYS, PT_INDEX, ptKey, CELL, GRID, cellKey,
+  ingestDetail, roadAt, TERR, LCLS, landcoverAt, terrainAt, cityAt, HOOKS, BARRIER_INSET, setupShoulders, rightEdge } = TW;
+const { renderer, MOBILE, scene, GLOW_LAMP, patch, TERRAIN_SPEC,
+  matLampPole, matSoundWall, matSoundGlass, matBillboard, matBillboardBack, matLampHead, matAsphalt, matConcrete, matBarrier, matGore,
+  matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber,
+  matReflBlack, matRetro, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, matWater, matTerrain } = TW;
+const S = () => TW.S;   // 玩家狀態 (drive.js 建立)
+
 // ======================================================================= 幾何建構
 class GB {
-  // mode: '' 只有位置；'uv' 加 aUv；'road' 加 aUv + 車道屬性
-  constructor(mode = '') { this.p = []; this.i = []; this.extra = mode === 'road'; if (mode) this.uv = []; if (this.extra) { this.ls = []; this.ln = []; } this.nrm = null; }
+  // mode: '' 只有位置；'uv' 加 aUv；'road' 加 aUv + 車道屬性 (aLs, aLanes)
+  constructor(mode = '') { this.p = []; this.i = []; this.mode = mode; if (mode) this.uv = []; if (mode === 'road') { this.ls = []; this.ln = []; } this.nrm = null; }
   get n() { return this.p.length / 3; }
   v(x, y, z) { this.p.push(x, z, -y); return this.n - 1; }  // 資料座標 -> three
+  /** 完整頂點 [x, y, z, u, v, ls, ln] */
+  vv(a) { const k = this.v(a[0], a[1], a[2]); if (this.uv) this.uv.push(a[3] || 0, a[4] || 0); if (this.ls) { this.ls.push(a[5] || 0); this.ln.push(a[6] || 0); } return k; }
   q(a, b, c, d) { this.i.push(a, b, c, a, c, d); }
-  mesh(mat, opts = {}) {
+  geometry() {
     if (!this.i.length) return null;
     const g = new T.BufferGeometry();
     g.setAttribute('position', new T.Float32BufferAttribute(this.p, 3));
     if (this.uv) g.setAttribute('aUv', new T.Float32BufferAttribute(this.uv, 2));
-    if (this.extra) {
-      g.setAttribute('aLs', new T.Float32BufferAttribute(this.ls, 1));
-      g.setAttribute('aLanes', new T.Float32BufferAttribute(this.ln, 1));
-    }
+    if (this.ls) { g.setAttribute('aLs', new T.Float32BufferAttribute(this.ls, 1)); g.setAttribute('aLanes', new T.Float32BufferAttribute(this.ln, 1)); }
     g.setIndex(this.n > 65535 ? new T.Uint32BufferAttribute(this.i, 1) : new T.Uint16BufferAttribute(this.i, 1));
     if (this.nrm) g.setAttribute('normal', new T.Float32BufferAttribute(this.nrm, 3)); else g.computeVertexNormals();
     g.computeBoundingSphere();
+    return g;
+  }
+  mesh(mat, opts = {}) {
+    const g = this.geometry(); if (!g) return null;
     const m = new T.Mesh(g, mat);
     m.castShadow = !!opts.cast; m.receiveShadow = opts.receive !== false;
     m.matrixAutoUpdate = false; m.updateMatrix();
     return m;
   }
 }
+function box(g, cx, cy, tx, ty, hx, hy, z0, z1) {
+  // tx,ty: 沿線方向；法向 = (-ty, tx)
+  const nx = -ty, ny = tx;
+  const c = (sx, sy, z) => g.v(cx + tx * sx * hx + nx * sy * hy, cy + ty * sx * hx + ny * sy * hy, z);
+  const a0 = c(-1, -1, z0), a1 = c(1, -1, z0), a2 = c(1, 1, z0), a3 = c(-1, 1, z0);
+  const b0 = c(-1, -1, z1), b1 = c(1, -1, z1), b2 = c(1, 1, z1), b3 = c(-1, 1, z1);
+  g.q(a3, a2, a1, a0); g.q(b0, b1, b2, b3);
+  g.q(a0, a1, b1, b0); g.q(a1, a2, b2, b1); g.q(a2, a3, b3, b2); g.q(a3, a0, b0, b3);
+}
+/** 圓片 (軸沿路線方向 tx,ty，面向來車)：中心 (cx, cy, cz)、半徑 r、厚 th */
+function disc(g, cx, cy, cz, tx, ty, r, th, seg = 12) {
+  const nx = -ty, ny = tx, b = g.n;
+  for (const f of [-1, 1]) {
+    const ox = cx + tx * th * 0.5 * f, oy = cy + ty * th * 0.5 * f;
+    g.v(ox, oy, cz);
+    for (let i = 0; i < seg; i++) { const a = i / seg * Math.PI * 2; g.v(ox + nx * Math.cos(a) * r, oy + ny * Math.cos(a) * r, cz + Math.sin(a) * r); }
+  }
+  const back = b, front = b + seg + 1;
+  for (let i = 0; i < seg; i++) {
+    const j = (i + 1) % seg;
+    g.i.push(back, back + 1 + j, back + 1 + i);
+    g.i.push(front, front + 1 + i, front + 1 + j);
+    g.q(back + 1 + i, back + 1 + j, front + 1 + j, front + 1 + i);
+  }
+}
+const withUv = (m) => { if (m) m.geometry.setAttribute('uv', m.geometry.getAttribute('aUv')); return m; };
 
+// ======================================================================= 小塊 (SUB x SUB 公尺) 與種類
+// 小塊大小: 路面/護欄 (base，到 7 km 都要畫) 用大塊 (少繪製呼叫，不投射陰影)；
+// 小物件 (只畫 1.4 km 內、會投射陰影) 用小塊，陰影只算玩家旁邊幾塊
+const SUB = +(params.get('sub') || 1920), SUB_P = +(params.get('subp') || 640);
+const subKey = (x, y, sz) => (Math.floor(x / sz) * 100003 + Math.floor(y / sz)) * 2 + (sz === SUB ? 0 : 1);
+// 種類 -> [GB 模式, 材質, 投射陰影, 接受陰影, 顯示距離類別]
+const R_PROP = MOBILE ? 800 : 1400, R_FINE = MOBILE ? 200 : 350, R_LAMP = MOBILE ? 1500 : 3000, R_SHADOW = MOBILE ? 0 : 320;
+const CATS = {
+  road: ['road', () => matAsphalt, 0, 1, 'base'], city: ['road', () => matCityRoad, 0, 1, 'mid'], skirt: ['', () => matConcrete, 0, 1, 'base'],
+  barrier: ['uv', () => matBarrier, 0, 1, 'base'], pier: ['', () => matConcrete, 0, 1, 'base'], gore: ['road', () => matGore, 0, 1, 'base'],
+  tunnel: ['uv', () => matTunnelWall, 0, 1, 'base'], swall: ['', () => matSoundWall, 0, 1, 'mid'], sglass: ['', () => matSoundGlass, 0, 0, 'mid'],
+  bboard: ['uv', () => matBillboard, 0, 1, 'mid'], bback: ['', () => matBillboardBack, 0, 1, 'mid'], bpole: ['', () => matLampPole, 0, 1, 'mid'],
+  glare: ['', () => matGlare, 1, 1, 'prop'], gpost: ['', () => matPost, 1, 1, 'prop'], gband: ['', () => matPostBand, 0, 1, 'prop'],
+  drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matLampPole, 1, 1, 'prop'],
+  tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
+  lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
+  tcab: ['', () => matCabinet, 0, 1, 'fine'], reflBlack: ['', () => matReflBlack, 0, 1, 'fine'], reflFace: ['uv', () => matRetro, 0, 0, 'fine'],
+};
+const KIND_R = { base: 1e9, mid: MOBILE ? 2000 : 3200, prop: R_PROP, fine: R_FINE, lamp: R_LAMP };
+// 同模式、同材質、同顯示類別、同陰影設定的種類共用一個網格 (少一次繪製呼叫)
+const SLOT = {};
+for (const [cat, c] of Object.entries(CATS)) { const k = [c[0], c[1]().uuid, c[2], c[3], c[4]].join('|'); SLOT[cat] = Object.keys(CATS).find((o) => { const d = CATS[o]; return [d[0], d[1]().uuid, d[2], d[3], d[4]].join('|') === k; }); }
+/** 一個分區建模時的暫存: 小塊 key -> { x, y, gb: {種類: GB}, glows: [], extra: [Object3D] } */
+class Build {
+  constructor() { this.chunks = new Map(); }
+  chunk(x, y, sz = SUB) {
+    const k = subKey(x, y, sz);
+    let c = this.chunks.get(k);
+    if (!c) this.chunks.set(k, c = { x: (Math.floor(x / sz) + 0.5) * sz, y: (Math.floor(y / sz) + 0.5) * sz, r: sz * 0.75, gb: {}, glows: [], extra: [], strips: new Map() });
+    return c;
+  }
+  /** (x, y) 所在小塊的某種類幾何 */
+  g(cat, x, y) { cat = SLOT[cat]; const c = this.chunk(x, y, CATS[cat][4] === 'base' || CATS[cat][4] === 'mid' ? SUB : SUB_P); return c.gb[cat] || (c.gb[cat] = new GB(CATS[cat][0])); }
+}
+/** 帶狀網格 (路面、護欄、隧道…): 每列一組斷面頂點，相鄰兩列依 pairs 連成四邊形。
+ *  每個四邊形放進兩列中點所在的小塊；跨小塊時前一列在新小塊重放一次 (所以小塊之間沒有缺口) */
+class Strip {
+  constructor(B, cat, pairs) { this.B = B; this.cat = SLOT[cat]; this.pairs = pairs; this.prev = null; this.id = Strip.next++; this.row = 0; }
+  /** verts: [[x,y,z,u,v,ls,ln], ...]；ok = false: 這一列跟上一列之間不連 */
+  add(verts, ok = true) {
+    const row = this.row++;
+    if (this.prev && ok) {
+      const p = this.prev, c = this.B.chunk((p.v[0][0] + verts[0][0]) / 2, (p.v[0][1] + verts[0][1]) / 2);
+      const g = c.gb[this.cat] || (c.gb[this.cat] = new GB(CATS[this.cat][0]));
+      const last = c.strips.get(this.id);
+      const pi = last && last.row === p.row ? last.idx : p.v.map((a) => g.vv(a));
+      const ci = verts.map((a) => g.vv(a));
+      for (const [a, b] of this.pairs) g.q(pi[a], pi[b], ci[b], ci[a]);
+      c.strips.set(this.id, { row, idx: ci });
+    }
+    this.prev = { v: verts, row };
+  }
+}
+Strip.next = 0;
+
+// ======================================================================= 國道道路
 // 混凝土護欄斷面 (照街景: 底部小斜趾、上半近乎垂直、平頂)；[橫向 m, 高 m]
 const BARRIER = [[-0.32, 0], [-0.3, 0.07], [-0.2, 0.16], [-0.11, 0.84], [-0.08, 0.87], [0.08, 0.87], [0.11, 0.84], [0.2, 0.16], [0.3, 0.07], [0.32, 0]];
-const BARRIER_INSET = 0.35;
+const BAR_PAIRS = BARRIER.slice(0, -1).map((_, j) => [j * 2, j * 2 + 1]);
+/** 沿線距離 d 處的點: { k 線段, x, y, z } */
+function along(w, d, k0 = 0) {
+  const { P, s, n } = w;
+  let k = k0; while (k < n - 2 && s[k + 1] < d) k++;
+  const t = Math.min(1, Math.max(0, (d - s[k]) / ((s[k + 1] - s[k]) || 1)));
+  return { k, x: P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, y: P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t, z: P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t };
+}
 
-// ---- 國道主線路肩 (照實際尺寸): 內側黃線到中央護欄面約 2 m、外側白線到外側護欄面 3 m、中央只有一道護欄
-// 原始資料: 黃線到路面左緣 1.0 m、右側路肩 3.3 m、兩方向路面間距中位數 1.4 m。
-// 路線中心線與 hw 都不動 (接點、匝道、隧道、AI 全部照舊)；車道整體往右移 0.6 m (ls 1.0 → 1.6)，
-// 路面逐點往左 (eL) / 往右 (eR) 多鋪一點: 右邊 0.97 m → 外側路肩 3 m (旁邊有匝道就縮)；
-// 左邊有對向路面 → 鋪到兩條路面正中間、在那裡放一道共用的護欄；沒有對向 → 多鋪 1.07 m、護欄放在新路緣
-const BAR_HALF = 0.32, LS_FWY = 1.6, ER_MAX = 0.97, EL_MAX = 1.07, PAIR_MAX = 3.0;
-const isFwyMain = (w) => !w.city && !w.trunk && !w.link && w.oneway && w.lanes >= 2;
-/** 第 i 點左右兩側最近的其他路面: 路緣到路緣的間距 gL / gR (m)，左側最近的是不是對向國道主線 */
-function sideProbe(w, i) {
-  const x = w.P[i * 3], y = w.P[i * 3 + 1], z = w.P[i * 3 + 2], nx = w.nx[i], ny = w.ny[i], tx = ny, ty = -nx, R = w.hw + 8;
-  let gL = null, gR = null, oL = null, seen = new Set();
-  for (let cx = Math.floor((x - R) / CELL); cx <= Math.floor((x + R) / CELL); cx++) for (let cy = Math.floor((y - R) / CELL); cy <= Math.floor((y + R) / CELL); cy++) {
-    const a = GRID.get(cellKey(cx, cy)); if (!a) continue;
-    for (let j = 0; j < a.length; j += 2) {
-      const o = WAYS[a[j]], si = a[j + 1];
-      if (!o || o === w || o.city) continue;
-      const id = a[j] * 100000 + si; if (seen.has(id)) continue; seen.add(id);
-      const ax = o.P[si * 3], ay = o.P[si * 3 + 1], bx = o.P[si * 3 + 3], by = o.P[si * 3 + 4], L = Math.hypot(bx - ax, by - ay);
-      if (L < 1e-3) continue;
-      const ux = (bx - ax) / L, uy = (by - ay) / L, dot = ux * tx + uy * ty;
-      if (Math.abs(dot) < 0.7) continue;   // 交叉的路不算
-      const t = (x - ax) * ux + (y - ay) * uy; if (t < -0.5 || t > L + 0.5) continue;
-      const tc = Math.min(L, Math.max(0, t)), qx = ax + ux * tc, qy = ay + uy * tc;
-      const qz = o.P[si * 3 + 2] + (o.P[si * 3 + 5] - o.P[si * 3 + 2]) * (tc / L);
-      if (Math.abs(qz - z) > 2) continue;   // 上下層不算
-      const lat = (qx - x) * nx + (qy - y) * ny, g = Math.abs(lat) - w.hw - o.hw;
-      if (g > 8 || Math.abs(lat) < 0.5) continue;
-      if (lat > 0) { if (gL == null || g < gL) { gL = g; oL = { o, opp: dot < -0.85 && isFwyMain(o) && !o.tunnel }; } }
-      else if (gR == null || g < gR) gR = g;
-    }
-  }
-  return { gL, gR, oL };
-}
-function setupShoulders(w) {
-  if (w.shoulder !== undefined) return;
-  w.shoulder = false;
-  if (!isFwyMain(w) || params.has('oldshoulder')) return;
-  w.ls = LS_FWY;   // 隧道也一樣 (車道跟洞外對齊)
-  if (w.tunnel) return;
-  const n = w.n, gL = new Array(n), gR = new Array(n), pair = new Uint8Array(n), opp = new Array(n).fill(null);
-  for (let i = 0; i < n; i++) {
-    const p = sideProbe(w, i); gL[i] = p.gL; gR[i] = p.gR;
-    if (p.oL && p.oL.opp && p.gL < PAIR_MAX) { pair[i] = 1; opp[i] = p.oL.o; }
-  }
-  // 零星一點沒配到 / 只配到一點: 補起來 / 拿掉
-  for (let i = 1; i < n - 1; i++) if (!pair[i] && pair[i - 1] && pair[i + 1]) { pair[i] = 1; opp[i] = opp[i - 1]; gL[i] = (gL[i - 1] + gL[i + 1]) / 2; }
-  for (let i = 0; i < n; i++) if (pair[i] && !(i > 0 && pair[i - 1]) && !(i < n - 1 && pair[i + 1])) pair[i] = 0;
-  // 平滑視窗在兩端縮小 (端點用原值): 前後兩條路段在接點量到的是同一個位置，才接得上
-  const avg = (arr, i, ok) => { const h = Math.min(3, i, n - 1 - i); let sum = 0, k = 0; for (let j = i - h; j <= i + h; j++) if (ok(j)) { sum += arr[j]; k++; } return k ? sum / k : arr[i]; };
-  const capL = new Float32Array(n), capR = new Float32Array(n), mid = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    if (pair[i]) mid[i] = avg(gL, i, (j) => pair[j]) / 2;   // 中央護欄中心 = 路緣外 g/2 (平滑)
-    capL[i] = pair[i] ? Math.max(0, mid[i]) : (gL[i] == null ? EL_MAX : Math.min(EL_MAX, Math.max(0, gL[i] / 2 - 0.05)));
-    capR[i] = gR[i] == null ? ER_MAX : Math.min(ER_MAX, Math.max(0, gR[i] - 0.05));
-  }
-  const eL = new Float32Array(n), eR = new Float32Array(n), bc = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    eL[i] = pair[i] ? capL[i] : Math.min(capL[i], avg(capL, i, (j) => !pair[j]));
-    eR[i] = Math.min(capR[i], avg(capR, i, () => true));
-    bc[i] = pair[i] ? w.hw + mid[i] : w.hw + eL[i] - BARRIER_INSET;
-  }
-  Object.assign(w, { shoulder: true, eL, eR, bc, pair, oppL: opp });
-}
-/** 門架 / 看板左側立柱位置 (左法向偏移): 國道主線立在中央護欄上 */
-function leftPost(w, i) { setupShoulders(w); return w.bc ? w.bc[Math.min(Math.max(i | 0, 0), w.n - 1)] : w.hw + 0.6; }
-/** 右側路緣 (加寬後) */
-function rightEdge(w, i) { setupShoulders(w); return w.hw + (w.eR ? w.eR[Math.min(Math.max(i | 0, 0), w.n - 1)] : 0); }
-
-// GB('uv') 的貼圖座標存在 aUv (給自訂著色器)；用標準材質的 map 時要複製一份成 uv
-const withUv = (m) => { if (m) m.geometry.setAttribute('uv', m.geometry.getAttribute('aUv')); return m; };
-/** (x, y) 這個 40 m 格子裡有沒有一般道路 (判斷國道旁邊是不是市區用) */
-function cityAt(x, y) {
-  const a = GRID.get(cellKey(Math.floor(x / CELL), Math.floor(y / CELL)));
-  if (a) for (let j = 0; j < a.length; j += 2) { const w = WAYS[a[j]]; if (w && w.city) return true; }
-  return false;
-}
 /** 國道外側路邊設施: 市區段的隔音牆 (下半實心、上半壓克力、4 m 一根柱子) 與約每 1.2 km 一面廣告看板 */
-function roadside(c, w, oAt, inward) {
-  const { P, nx, ny, s, n, hw, M } = w, L = s[n - 1];
+function roadside(B, w, oAt, inward) {
+  const { nx, ny, hw, M } = w, L = w.len;
   if (L < 30) return;
-  const at = (d) => { let k = 0; while (k < n - 2 && s[k + 1] < d) k++; const t = Math.min(1, Math.max(0, (d - s[k]) / ((s[k + 1] - s[k]) || 1)));
-    return { k, x: P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, y: P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t, z: P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t }; };
   const out = -inward;   // 外側方向 (乘在左法向上)
-  // 每 20 m 判一次旁邊是不是市區，前後各延伸 40 m (隔音牆會一路延伸過市區邊緣，不會一段一段)
+  // 每 20 m 判一次旁邊是不是市區，前後各延伸 40 m (隔音牆一路延伸過市區邊緣，不會一段一段)
   const step = 20, ns = Math.ceil(L / step) + 1, urb = new Uint8Array(ns);
-  for (let q = 0; q < ns; q++) {
-    const p = at(q * step), ox = nx[p.k] * out, oy = ny[p.k] * out;
-    // 市區: 外側 35 / 60 / 90 m 有一般道路，或地表分類是市區 (台北盆地大部分沒有土地分類資料，只看分類會判不到)
+  for (let q = 0, k = 0; q < ns; q++) {
+    const p = along(w, q * step, k); k = p.k;
+    const ox = nx[p.k] * out, oy = ny[p.k] * out;
     let u = 0;
     for (const dd of [35, 60, 90]) { const xx = p.x + ox * (hw + dd), yy = p.y + oy * (hw + dd); if (landcoverAt(xx, yy) === 5 || cityAt(xx, yy)) { u = 1; break; } }
     urb[q] = u;
   }
   const wall = new Uint8Array(ns);
   for (let q = 0; q < ns; q++) if (urb[q]) for (let r = Math.max(0, q - 2); r <= Math.min(ns - 1, q + 2); r++) wall[r] = 1;
-  // 隔音牆 (4 m 一片)
-  for (let d = 2; d < L - 2; d += 4) {
+  for (let d = 2, k = 0; d < L - 2; d += 4) {
     if (!wall[Math.min(ns - 1, Math.round(d / step))]) continue;
-    const p = at(d); if ((M[p.k] | M[p.k + 1]) & 2) continue;
+    const p = along(w, d, k); k = p.k; if ((M[p.k] | M[p.k + 1]) & 2) continue;
     const tx = ny[p.k], ty = -nx[p.k], ox = nx[p.k] * out, oy = ny[p.k] * out;
     const o = oAt(p.k), cx = p.x + nx[p.k] * o + ox * 0.18, cy = p.y + ny[p.k] * o + oy * 0.18;
-    box(c.swall, cx, cy, tx, ty, 2.0, 0.07, p.z + 0.86, p.z + 2.3);
-    box(c.sglass, cx, cy, tx, ty, 1.97, 0.03, p.z + 2.3, p.z + 4.2);
-    box(c.spost, cx - tx * 2, cy - ty * 2, tx, ty, 0.09, 0.11, p.z + 0.86, p.z + 4.35);
-    box(c.spost, cx, cy, tx, ty, 2.0, 0.05, p.z + 4.2, p.z + 4.32);   // 頂部壓條
+    box(B.g('swall', cx, cy), cx, cy, tx, ty, 2.0, 0.07, p.z + 0.86, p.z + 2.3);
+    box(B.g('sglass', cx, cy), cx, cy, tx, ty, 1.97, 0.03, p.z + 2.3, p.z + 4.2);
+    const sp = B.g('spost', cx, cy);
+    box(sp, cx - tx * 2, cy - ty * 2, tx, ty, 0.09, 0.11, p.z + 0.86, p.z + 4.35);
+    box(sp, cx, cy, tx, ty, 2.0, 0.05, p.z + 4.2, p.z + 4.32);   // 頂部壓條
   }
-  // 廣告看板: 市區段約每 1.2 km 一面 (位置由 gid 決定，每次載入都一樣)，立在護欄外 9 m，面向來車並往路內轉 18°
+  // 廣告看板: 市區段約每 1.2 km 一面 (位置由 gid 決定)，立在護欄外 9 m，面向來車並往路內轉 18°
   const first = 250 + ((w.gid * 7919) % 900);
   for (let d = first, idx = w.gid; d < L - 60; d += 1200, idx++) {
     if (!urb[Math.min(ns - 1, Math.round(d / step))]) continue;
-    const p = at(d); if ((M[p.k] | M[p.k + 1]) & 2) continue;
+    const p = along(w, d); if ((M[p.k] | M[p.k + 1]) & 2) continue;
     const tx = ny[p.k], ty = -nx[p.k], ox = nx[p.k] * out, oy = ny[p.k] * out;
     const o = oAt(p.k), bx = p.x + nx[p.k] * o + ox * 9, by = p.y + ny[p.k] * o + oy * 9;
     const gz = terrainAt(bx, by), base = Math.min(gz, p.z), top = p.z + 13, bot = top - 4.2;
     if (p.z - gz > 25) continue;   // 高架很高的地方不放
-    box(c.bpole, bx, by, tx, ty, 0.35, 0.35, base - 0.5, bot + 0.5);
-    // 板面: 法向 = -行進方向 (面向來車) 往路內轉 18°
+    box(B.g('bpole', bx, by), bx, by, tx, ty, 0.35, 0.35, base - 0.5, bot + 0.5);
     const a = 0.31, fx = -tx * Math.cos(a) - ox * Math.sin(a), fy = -ty * Math.cos(a) - oy * Math.sin(a);   // 板面朝向
-    const ux = -fy, uy = fx;   // 板面水平方向
-    const hwB = 6.0, ad = idx % 6, u0 = (ad % 3) / 3, v0 = 1 - Math.floor(ad / 3) / 2;
-    const g = c.bboard, i0 = g.n, fxo = fx * 0.12, fyo = fy * 0.12;
+    const ux = -fy, uy = fx, hwB = 6.0, ad = idx % 6, u0 = (ad % 3) / 3, v0 = 1 - Math.floor(ad / 3) / 2;
+    const g = B.g('bboard', bx, by), i0 = g.n, fxo = fx * 0.12, fyo = fy * 0.12;
     g.v(bx + fxo - ux * hwB, by + fyo - uy * hwB, bot); g.uv.push(u0 + 1 / 3, v0 - 0.5);
     g.v(bx + fxo + ux * hwB, by + fyo + uy * hwB, bot); g.uv.push(u0, v0 - 0.5);
     g.v(bx + fxo + ux * hwB, by + fyo + uy * hwB, top); g.uv.push(u0, v0);
     g.v(bx + fxo - ux * hwB, by + fyo - uy * hwB, top); g.uv.push(u0 + 1 / 3, v0);
     g.q(i0, i0 + 1, i0 + 2, i0 + 3);
-    box(c.bback, bx, by, ux, uy, hwB + 0.15, 0.1, bot - 0.15, top + 0.15);   // 背板 + 邊框
-    box(c.bpole, bx, by, ux, uy, hwB, 0.08, bot - 0.6, bot - 0.45);           // 下方維修走道
+    box(B.g('bback', bx, by), bx, by, ux, uy, hwB + 0.15, 0.1, bot - 0.15, top + 0.15);   // 背板 + 邊框
+    box(B.g('bpole', bx, by), bx, by, ux, uy, hwB, 0.08, bot - 0.6, bot - 0.45);           // 下方維修走道
   }
 }
-function addRoad(c, w) {
+
+/** 反光片一支: 底座 → 支柱 → 黑色圓框 → 黃色反光面 (迎著來車)；(x, y, z0) 是護欄頂 */
+function addReflector(B, x, y, z0, tx, ty) {
+  const K = B.g('reflBlack', x, y), F = B.g('reflFace', x, y), nx = -ty, ny = tx;
+  const b0 = K.n, seg = 8;
+  for (const zz of [z0, z0 + 0.018]) for (let i = 0; i < seg; i++) { const a = i / seg * Math.PI * 2; K.v(x + tx * Math.cos(a) * 0.085 + nx * Math.sin(a) * 0.055, y + ty * Math.cos(a) * 0.085 + ny * Math.sin(a) * 0.055, zz); }
+  for (let i = 0; i < seg; i++) { const j = (i + 1) % seg; K.q(b0 + i, b0 + j, b0 + seg + j, b0 + seg + i); K.i.push(b0 + seg, b0 + seg + j, b0 + seg + i); }
+  box(K, x, y, tx, ty, 0.022, 0.022, z0 + 0.018, z0 + 0.15);   // 支柱
+  box(K, x, y, tx, ty, 0.03, 0.03, z0 + 0.07, z0 + 0.11);      // 束環
+  const zc = z0 + 0.24;
+  disc(K, x, y, zc, tx, ty, 0.1, 0.034, 16);                   // 黑色圓框
+  const fx = x - tx * 0.019, fy = y - ty * 0.019, r = 0.083, fs = 16, f0 = F.n;
+  F.v(fx, fy, zc); F.uv.push(0, 0);
+  for (let i = 0; i < fs; i++) { const a = i / fs * Math.PI * 2; F.v(fx + nx * Math.cos(a) * r, fy + ny * Math.cos(a) * r, zc + Math.sin(a) * r); F.uv.push(Math.cos(a), Math.sin(a)); }
+  for (let i = 0; i < fs; i++) F.i.push(f0, f0 + 1 + ((i + 1) % fs), f0 + 1 + i);
+}
+
+function addRoad(B, w) {
   setupShoulders(w);
-  const { P, nx, ny, s, n, hw } = w;
-  // 兩側路緣 (國道主線多鋪的路肩: 左 eL、右 eR；u 座標仍從原本左路緣起算，標線位置不變)
-  const EL = (i) => w.eL ? w.eL[i] : 0, ER = (i) => w.eR ? w.eR[i] : 0;
-  // 路面
-  const r = c.road, b0 = r.n;
+  const { P, nx, ny, s, n, hw, M } = w;
+  const EL = (i) => w.eL ? w.eL[i] : 0, ER = (i) => w.eR ? w.eR[i] : 0, PR = (i) => !!(w.pair && w.pair[i]);
+  // 路面 (u 座標從原本左路緣起算，加寬的路肩 u < 0 / u > width，標線位置不變)
+  const lsT = w.ls + (w.tunnel ? 100 : 0);   // 隧道旗標: 著色器用 aLs >= 50 判斷
+  const road = new Strip(B, 'road', [[0, 1]]);
   for (let i = 0; i < n; i++) {
     const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], le = hw + EL(i), re = hw + ER(i);
-    const lsT = w.ls + (w.tunnel ? 100 : 0);   // 隧道旗標: 著色器用 aLs >= 50 判斷
-    r.v(x + nx[i] * le, y + ny[i] * le, z); r.uv.push(-EL(i), s[i]); r.ls.push(lsT); r.ln.push(w.lanes);
-    r.v(x - nx[i] * re, y - ny[i] * re, z); r.uv.push(w.width + ER(i), s[i]); r.ls.push(lsT); r.ln.push(w.lanes);
+    road.add([[x + nx[i] * le, y + ny[i] * le, z, -EL(i), s[i], lsT, w.lanes], [x - nx[i] * re, y - ny[i] * re, z, w.width + ER(i), s[i], lsT, w.lanes]],
+      !(i > 0 && (M[i - 1] & M[i] & 4)));   // bit2: 匝道整段在主線路面內，不畫
   }
-  for (let i = 0; i < n - 1; i++) { if (w.M[i] & w.M[i + 1] & 4) continue; const a = b0 + i * 2; r.q(a, a + 1, a + 3, a + 2); }   // bit2: 匝道整段在主線路面內 (fix_clip.mjs)，不畫
-  // 側面 / 梁底
+  // 側面 / 梁底 (左右各一條帶子；落在別條路面上、或中央分隔接著對向路面就不做)
   const depth = w.bridge ? 2.2 : (w.tunnel ? 0.6 : 2.0);
-  const k = c.skirt, s0 = k.n;
+  const sl = new Strip(B, 'skirt', [[1, 0]]), sr = new Strip(B, 'skirt', [[0, 1]]), sb = w.bridge ? new Strip(B, 'skirt', [[1, 0]]) : null;
   for (let i = 0; i < n; i++) {
-    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-    const le = hw + EL(i), re = hw + ER(i);
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], le = hw + EL(i), re = hw + ER(i);
     const lx = x + nx[i] * le, ly = y + ny[i] * le, rx = x - nx[i] * re, ry = y - ny[i] * re;
-    k.v(lx, ly, z); k.v(rx, ry, z); k.v(lx, ly, z - depth); k.v(rx, ry, z - depth);
+    const okL = i > 0 && !((M[i - 1] | M[i]) & 1) && !(PR(i - 1) && PR(i) && !w.bridge), okR = i > 0 && !((M[i - 1] | M[i]) & 2);
+    sl.add([[lx, ly, z], [lx, ly, z - depth]], okL);
+    sr.add([[rx, ry, z], [rx, ry, z - depth]], okR);
+    if (sb) sb.add([[lx, ly, z - depth], [rx, ry, z - depth]]);
   }
-  const M = w.M, PR = (i) => w.pair && w.pair[i];
-  for (let i = 0; i < n - 1; i++) {
-    const a = s0 + i * 4, bb = a + 4;
-    if (!((M[i] | M[i + 1]) & 1) && !(PR(i) && PR(i + 1) && !w.bridge)) k.q(a, bb, bb + 2, a + 2);          // 左側 (落在別條路面上就不做)
-    if (!((M[i] | M[i + 1]) & 2)) k.q(a + 1, a + 3, bb + 3, bb + 1);  // 右側
-    if (w.bridge) k.q(a + 2, bb + 2, bb + 3, a + 3);                 // 梁底
-  }
-  // 紐澤西護欄 (左右；分合流處落在別條路面上的段落不放)
-  for (const [edge, inward, bit] of (w.tunnel ? [] : [[hw, -1, 1], [-hw, 1, 2]])) {   // 隧道內是檢修步道，不放護欄
-    // 每個斷面線段各自一組頂點 (稜角分明)；UV: u = 沿線距離、v = 高度 (給接縫、排水孔、髒污用)
-    const g = c.barrier, g0 = g.n, segs = BARRIER.length - 1, per = segs * 2;
+  // 紐澤西護欄 (左右；分合流處落在別條路面上的段落不放；隧道內是檢修步道，不放)
+  if (!w.tunnel) for (const [edge, inward, bit] of [[hw, -1, 1], [-hw, 1, 2]]) {
     const o = edge + inward * BARRIER_INSET;
     // 護欄中心 (左法向偏移): 國道主線左邊 = 中央護欄 (w.bc)、右邊 = 加寬後路緣往內 0.35 m
     const oAt = (i) => w.bc ? (bit === 1 ? w.bc[i] : -(hw + ER(i)) + BARRIER_INSET) : o;
-    // 共用的中央護欄 (左邊有對向路面) 只由 gid 小的那一條建，才不會兩道疊在一起
+    // 共用的中央護欄 (左邊有對向路面) 只由 gid 小的那一條建
     const notMine = (i) => bit === 1 && PR(i) && w.oppL[i] && w.oppL[i].gid < w.gid;
+    const bar = new Strip(B, 'barrier', BAR_PAIRS);
     for (let i = 0; i < n; i++) {
-      const oi = oAt(i), cx = P[i * 3] + nx[i] * oi, cy = P[i * 3 + 1] + ny[i] * oi, cz = P[i * 3 + 2];
-      for (let j = 0; j < segs; j++) for (const [a, h] of [BARRIER[j], BARRIER[j + 1]]) {
-        g.v(cx + nx[i] * a, cy + ny[i] * a, cz + h - 0.03); g.uv.push(s[i], h);
-      }
+      const oi = oAt(i), cx = P[i * 3] + nx[i] * oi, cy = P[i * 3 + 1] + ny[i] * oi, cz = P[i * 3 + 2], verts = [];
+      for (let j = 0; j < BARRIER.length - 1; j++) for (const [a, h] of [BARRIER[j], BARRIER[j + 1]]) verts.push([cx + nx[i] * a, cy + ny[i] * a, cz + h - 0.03, s[i], h]);
+      bar.add(verts, i > 0 && !((M[i - 1] | M[i]) & bit) && !(notMine(i - 1) && notMine(i)));
     }
-    for (let i = 0; i < n - 1; i++) {
-      if ((M[i] | M[i + 1]) & bit) continue;
-      if (notMine(i) && notMine(i + 1)) continue;
-      for (let j = 0; j < segs; j++) { const a = g0 + i * per + j * 2; g.q(a, a + 1, a + 1 + per, a + per); }
-    }
-    // 防眩板: 國道主線中央分隔護欄 (左側) 頂上每 4 m 一片，板面幾乎垂直路線 (擋對向車燈、側面看得穿)。
-    // 雙向兩條路面緊貼時兩邊的護欄並排，只由 gid 較小的那一側放，才不會變兩排
-    if (bit === 1 && !w.link && !w.tunnel && w.oneway && !params.has('noglare')) {
+    // 防眩板: 中央分隔護欄頂上每 4 m 一片，板面幾乎垂直路線 (擋對向車燈、側面看得穿)
+    if (bit === 1 && !w.link && w.oneway && !params.has('noglare')) {
       let skip = false;
-      for (let d = 2; d < s[n - 1]; d += 4) {
-        let k = 0; while (k < n - 2 && s[k + 1] < d) k++;
+      for (let d = 2, k = 0; d < s[n - 1]; d += 4) {
+        const p = along(w, d, k); k = p.k;
         if ((M[k] | M[k + 1]) & bit) continue;
-        const t = (d - s[k]) / ((s[k + 1] - s[k]) || 1);
-        const bx = P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, by = P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t;
-        const z = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t;
         if (w.bc) skip = notMine(k);
-        else if (((d - 2) / 4) % 10 === 0) {   // 每 40 m 看一次旁邊是不是緊貼著對向路面
-          const pr = roadAt(bx + nx[k] * (hw + 1.6), by + ny[k] * (hw + 1.6), z, 0, 1.5);
-          skip = !!(pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid);
+        else if (((d - 2) / 4) % 10 === 0) {   // 快速道路: 每 40 m 看一次旁邊是不是緊貼著對向路面
+          const pr = roadAt(p.x + nx[k] * (hw + 1.6), p.y + ny[k] * (hw + 1.6), p.z, 0, 1.5);
+          skip = !!(pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - p.z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid);
         }
         if (skip) continue;
-        const ok = oAt(k), x = bx + nx[k] * ok, y = by + ny[k] * ok, a = 0.21;   // 板面轉 12°
-        const tx = ny[k] * Math.cos(a) + nx[k] * Math.sin(a), ty = -nx[k] * Math.cos(a) + ny[k] * Math.sin(a);
-        box(c.glare, x, y, tx, ty, 0.022, 0.12, z + 0.84, z + 1.55);
-        box(c.glare, x, y, ny[k], -nx[k], 0.03, 0.03, z + 0.8, z + 0.9);   // 底座
+        const ok = oAt(k), x = p.x + nx[k] * ok, y = p.y + ny[k] * ok, a = 0.21;   // 板面轉 12°
+        const tx = ny[k] * Math.cos(a) + nx[k] * Math.sin(a), ty = -nx[k] * Math.cos(a) + ny[k] * Math.sin(a), g = B.g('glare', x, y);
+        box(g, x, y, tx, ty, 0.022, 0.12, p.z + 0.84, p.z + 1.55);
+        box(g, x, y, ny[k], -nx[k], 0.03, 0.03, p.z + 0.8, p.z + 0.9);   // 底座
       }
     }
-    // 隔音牆 + 廣告看板: 國道主線外側 (右邊)，旁邊 30~60 m 是市區的路段
-    if (bit === 2 && !w.link && !w.tunnel && w.oneway && !w.city && !params.has('nowall')) roadside(c, w, oAt, inward);
-    // 路燈: 國道主線中央分隔島每 40 m 一支雙臂燈 (夜晚燈頭發光、路面有光暈)
-    if (bit === 1 && !w.link && !w.tunnel && w.oneway && !params.has('nolamps')) {
-      for (let d = 2; d < s[n - 1]; d += 40) {
-        let k = 0; while (k < n - 2 && s[k + 1] < d) k++;
+    // 隔音牆 + 廣告看板: 國道主線外側
+    if (bit === 2 && !w.link && w.oneway && !params.has('nowall')) roadside(B, w, oAt, inward);
+    // 路燈: 中央分隔島每 40 m 一支雙臂燈
+    if (bit === 1 && !w.link && w.oneway && !params.has('nolamps')) {
+      for (let d = 2, k = 0; d < s[n - 1]; d += 40) {
+        const p = along(w, d, k); k = p.k;
         if ((M[k] | M[k + 1]) & bit) continue;
-        const t = (d - s[k]) / ((s[k + 1] - s[k]) || 1);
-        const bx = P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, by = P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t;
-        const z = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t;
         if (w.bc) { if (notMine(k)) continue; }
         else {
-          const pr = roadAt(bx + nx[k] * (hw + 1.6), by + ny[k] * (hw + 1.6), z, 0, 1.5);
-          if (pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid) continue;
+          const pr = roadAt(p.x + nx[k] * (hw + 1.6), p.y + ny[k] * (hw + 1.6), p.z, 0, 1.5);
+          if (pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - p.z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid) continue;
         }
-        const ok = oAt(k), x = bx + nx[k] * ok, y = by + ny[k] * ok;
-        box(c.lampPole, x, y, ny[k], -nx[k], 0.09, 0.09, z + 0.85, z + 10.5);
-        box(c.lampPole, x, y, ny[k], -nx[k], 0.05, 2.0, z + 10.3, z + 10.42);
+        const ok = oAt(k), x = p.x + nx[k] * ok, y = p.y + ny[k] * ok, z = p.z;
+        const lp = B.g('lampPole', x, y), lh = B.g('lampHead', x, y);
+        box(lp, x, y, ny[k], -nx[k], 0.09, 0.09, z + 0.85, z + 10.5);
+        box(lp, x, y, ny[k], -nx[k], 0.05, 2.0, z + 10.3, z + 10.42);
         for (const sd of [-1, 1]) {
           const lx = x + nx[k] * sd * 1.9, ly = y + ny[k] * sd * 1.9;
-          box(c.lampHead, lx, ly, ny[k], -nx[k], 0.32, 0.16, z + 10.12, z + 10.3);
-          c.glows.push(lx, z + 10.05, -ly);
+          box(lh, lx, ly, ny[k], -nx[k], 0.32, 0.16, z + 10.12, z + 10.3);
+          B.chunk(x, y, SUB_P).glows.push(lx, z + 10.05, -ly);
         }
       }
     }
-    // 反光片: 每 24 m 一支 (照實物: 黃色圓形稜鏡反光片、黑色外框、黑色支柱、橢圓底座)，反光面朝來車
-    for (let d = 12; d < s[n - 1]; d += 24) {
-      let k = 0; while (k < n - 2 && s[k + 1] < d) k++;
+    // 反光片: 外側護欄每 24 m 一支 (黃色圓形稜鏡反光片)，反光面朝來車
+    if (bit === 2) for (let d = 12, k = 0; d < s[n - 1]; d += 24) {
+      const p = along(w, d, k); k = p.k;
       if ((M[k] | M[k + 1]) & bit) continue;
-      const t = (d - s[k]) / ((s[k + 1] - s[k]) || 1);
-      const ok = oAt(k), x = P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t + nx[k] * ok, y = P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t + ny[k] * ok;
-      const z = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t;
-      if (bit === 1) continue;   // 中央分隔島 (左側) 不放反光片
-      addReflector(c, x, y, z + 0.87, ny[k], -nx[k]);
+      const ok = oAt(k);
+      addReflector(B, p.x + nx[k] * ok, p.y + ny[k] * ok, p.z + 0.87, ny[k], -nx[k]);
     }
   }
-  if (w.tunnel) addTunnel(c, w);
+  if (w.tunnel) addTunnel(B, w);
 }
 
-// ======================================================================= 匝道槽化區 (照街景: 白色斑馬紋、兩側白實線、橘色導桿、鼻端黃色緩衝桶)
+// ======================================================================= 匝道槽化區 (白色斑馬紋、兩側白實線、橘色導桿、鼻端黃色緩衝桶)
 const GORE_MAX = 9;
-/** 最近的同向主線 (投影點、左法向、橫向距離)；搜尋周圍 3x3 格，因為槽化區離主線中心線可能 20 m 以上 */
+/** 最近的同向主線 (投影點、左法向、橫向距離)；搜尋周圍 3x3 格 */
 function projMainRT(x, y, z, tx, ty) {
   const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
   let best = null;
@@ -1642,40 +1832,37 @@ function projMainRT(x, y, z, tx, ty) {
   }
   return best;
 }
-function addGore(c, w, r) {
-  const { P, n } = w, dir = r.e === 0 ? 1 : -1, side = r.side, G = c.gore;
-  let along = 0, prevRow = -1, lastPost = -1e9, drums = false, prevGap = null, prevM = null;
-  for (let k = r.e; k >= 0 && k < n && along < 450; k += dir) {
-    if (k !== r.e) along += Math.hypot(P[k * 3] - P[(k - dir) * 3], P[k * 3 + 1] - P[(k - dir) * 3 + 1]);
+function addGore(B, w, r) {
+  const { P, n } = w, dir = r.e === 0 ? 1 : -1, side = r.side;
+  const G = new Strip(B, 'gore', [[0, 1]]);
+  let dist = 0, lastPost = -1e9, drums = false, prevGap = null, prevM = null, gapRow = true;
+  for (let k = r.e; k >= 0 && k < n && dist < 450; k += dir) {
+    if (k !== r.e) dist += Math.hypot(P[k * 3] - P[(k - dir) * 3], P[k * 3 + 1] - P[(k - dir) * 3 + 1]);
     const m = projMainRT(P[k * 3], P[k * 3 + 1], P[k * 3 + 2], w.ny[k], -w.nx[k]);
     if (!m) break;
     const mE = side < 0 ? rightEdge(m.w, m.i) : m.w.hw;   // 主線那一側的路緣 (右側有加寬的路肩)
     const gap = side * m.lat - mE - w.hw;
     if (side * m.lat <= 0 || (prevGap != null && gap < prevGap - 1.5) || (prevM && m.w !== prevM.w && Math.abs(m.lat - prevM.lat) > 4)) break;   // 找到別條主線: 停
     prevGap = gap; prevM = m;
-    if (gap < 0.3) { prevRow = -1; continue; }   // 還疊在主線路面上: 槽化區從兩路緣分開的地方才開始
+    if (gap < 0.3) { gapRow = true; continue; }   // 還疊在主線路面上: 槽化區從兩路緣分開的地方才開始
     const ex = m.px + side * m.nx * mE, ey = m.py + side * m.ny * mE, ez = m.pz;
     const lx = P[k * 3] - side * m.nx * w.hw, ly = P[k * 3 + 1] - side * m.ny * w.hw, lz = P[k * 3 + 2];
     const W = Math.max(0, Math.hypot(lx - ex, ly - ey));
-    const a = G.v(ex, ey, ez + 0.01); G.uv.push(along, 0); G.ls.push(W); G.ln.push(0);
-    G.v(lx, ly, lz + 0.01); G.uv.push(along, W); G.ls.push(W); G.ln.push(0);
-    if (prevRow >= 0) G.q(prevRow, prevRow + 1, a + 1, a);
-    prevRow = a;
-    // 導桿: 槽化區中線，每 2.5 m 一支 (寬度夠才放)
-    if (W > 1.2 && along - lastPost >= 2.5) {
-      lastPost = along;
+    G.add([[ex, ey, ez + 0.01, dist, 0, W, 0], [lx, ly, lz + 0.01, dist, W, W, 0]], !gapRow);
+    gapRow = false;
+    if (W > 1.2 && dist - lastPost >= 2.5) {   // 導桿: 槽化區中線，每 2.5 m 一支
+      lastPost = dist;
       const px = (ex + lx) / 2, py = (ey + ly) / 2, pz = (ez + lz) / 2;
-      box(c.gpost, px, py, w.ny[k], -w.nx[k], 0.045, 0.045, pz, pz + 0.75);
-      box(c.gband, px, py, w.ny[k], -w.nx[k], 0.05, 0.05, pz + 0.5, pz + 0.62);
+      box(B.g('gpost', px, py), px, py, w.ny[k], -w.nx[k], 0.045, 0.045, pz, pz + 0.75);
+      box(B.g('gband', px, py), px, py, w.ny[k], -w.nx[k], 0.05, 0.05, pz + 0.5, pz + 0.62);
     }
-    if (gap > GORE_MAX) {
-      // 鼻端 (護欄開始處) 放三個黃色緩衝桶
+    if (gap > GORE_MAX) {   // 鼻端 (護欄開始處) 放三個黃色緩衝桶
       if (!drums) {
         drums = true;
         for (let d = 0; d < 3; d++) {
           const f = (d + 1) / 4, qx = ex + (lx - ex) * f, qy = ey + (ly - ey) * f, qz = ez + (lz - ez) * f;
-          box(c.drum, qx, qy, w.ny[k], -w.nx[k], 0.42, 0.42, qz, qz + 0.95);
-          box(c.drumb, qx, qy, w.ny[k], -w.nx[k], 0.43, 0.43, qz + 0.55, qz + 0.68);
+          box(B.g('drum', qx, qy), qx, qy, w.ny[k], -w.nx[k], 0.42, 0.42, qz, qz + 0.95);
+          box(B.g('drumb', qx, qy), qx, qy, w.ny[k], -w.nx[k], 0.43, 0.43, qz + 0.55, qz + 0.68);
         }
       }
       break;
@@ -1683,35 +1870,51 @@ function addGore(c, w, r) {
   }
 }
 
-// ======================================================================= 伸縮縫 (橋梁接縫)
-// 每座橋墩上方與橋頭各一道；車輪壓過時「叩」一聲 (前輪、後輪各一下)
-const JOINTS = [], JGRID = new Map(), JCELL = 50;
-function addJoint(x, y, tx, ty, hw, z) {
-  const j = { x, y, tx, ty, hw, z };
-  JOINTS.push(j);
-  const r = hw + 2;
-  for (let cx = Math.floor((x - r) / JCELL); cx <= Math.floor((x + r) / JCELL); cx++)
-    for (let cy = Math.floor((y - r) / JCELL); cy <= Math.floor((y + r) / JCELL); cy++) {
+// ======================================================================= 伸縮縫 (橋梁接縫): 每座橋墩上方與橋頭各一道；車輪壓過時「叩」一聲
+const JGRID = new Map(), JCELL = 50, JSEEN = new Set();
+// 伸縮縫 = { x, y: 路中心線上的點, z, tx, ty: 路線方向, hL, hR: 往左 / 往右到路緣 (含加寬的路肩), k: 路段 }
+function addJoint(j) {
+  const r = Math.max(j.hL, j.hR) + 2;
+  for (let cx = Math.floor((j.x - r) / JCELL); cx <= Math.floor((j.x + r) / JCELL); cx++)
+    for (let cy = Math.floor((j.y - r) / JCELL); cy <= Math.floor((j.y + r) / JCELL); cy++) {
       const k = cx * 100003 + cy;
       let a = JGRID.get(k); if (!a) JGRID.set(k, a = []); a.push(j);
     }
 }
-const JSEEN = new Set();
-/** 分區的伸縮縫 (需要鄰區資料: 橋頭判斷、橋墩上方路面) -> [[x, y, z, tx, ty, hw]] */
+/** 路段 w 第 i 段上、離 (x, y) 最近的中心線點 -> 伸縮縫 (垂直路線、左右到路緣) */
+function jointOn(w, i, x, y) {
+  setupShoulders(w);
+  const P = w.P, ax = P[i * 3], ay = P[i * 3 + 1], dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L = Math.hypot(dx, dy) || 1;
+  const t = Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / (L * L)));
+  const lerp = (a) => a ? a[i] + (a[i + 1] - a[i]) * t : 0;
+  return { x: ax + dx * t, y: ay + dy * t, z: P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t, tx: dx / L, ty: dy / L, hL: w.hw + lerp(w.eL), hR: w.hw + lerp(w.eR), k: w.k };
+}
+/** 分區的伸縮縫 (需要鄰區資料)。同一座橋墩撐兩個方向的橋面時，每條各一道 */
 function computeJoints(rec) {
   const out = [];
-  const mk = (x, y, z, tx, ty, hw) => {
-    const key = Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z);
+  const mk = (j) => {
+    const key = j.k + ':' + Math.round(j.x) + ',' + Math.round(j.y);
     if (JSEEN.has(key)) return;
-    JSEEN.add(key);
-    out.push([x, y, z, tx, ty, hw]);
-    addJoint(x, y, tx, ty, hw, z);
+    JSEEN.add(key); out.push(j); addJoint(j);
   };
   const A = rec.piers;
-  for (let k = 0; k < A.length / 9; k++) {   // 橋墩上方
-    const x = A[k * 9], y = A[k * 9 + 1], tx = A[k * 9 + 2], ty = A[k * 9 + 3], top = A[k * 9 + 6];
-    const r = roadAt(x, y, top + 2.5, 0, 1.0);
-    if (r && Math.abs(r.z - (top + 2.2)) < 1.5) mk(x, y, r.z, tx, ty, r.w.hw);
+  for (let k = 0; k < A.length / 9; k++) {   // 橋墩上方: 帽梁上的每一條橋面
+    const x = A[k * 9], y = A[k * 9 + 1], top = A[k * 9 + 6], cells = new Set(), best = new Map();
+    for (const [ox, oy] of [[0, 0], [-16, 0], [16, 0], [0, -16], [0, 16]]) cells.add(cellKey(Math.floor((x + ox) / CELL), Math.floor((y + oy) / CELL)));
+    for (const c of cells) {
+      const a = GRID.get(c); if (!a) continue;
+      for (let q = 0; q < a.length; q += 2) {
+        const w = WAYS[a[q]], i = a[q + 1];
+        if (w.city || w.tunnel) continue;
+        const P = w.P, ax = P[i * 3], ay = P[i * 3 + 1], dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L2 = dx * dx + dy * dy;
+        if (L2 < 1e-6) continue;
+        const t = ((x - ax) * dx + (y - ay) * dy) / L2; if (t < 0 || t > 1) continue;
+        const lat = Math.abs(((x - ax) * -dy + (y - ay) * dx) / Math.sqrt(L2)), z = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t;
+        if (Math.abs(z - (top + 2.2)) > 1.5 || lat > w.hw + 16) continue;   // 在這座帽梁上
+        const b = best.get(w); if (!b || lat < b.d) best.set(w, { d: lat, i });
+      }
+    }
+    for (const [w, b] of best) mk(jointOn(w, b.i, x, y));
   }
   for (const k of rec.ways) {             // 橋頭 (橋接地面路段處)
     const w = WAYS[k];
@@ -1719,22 +1922,21 @@ function computeJoints(rec) {
     for (const i of [0, w.n - 1]) {
       const others = PT_INDEX.get(ptKey(w.P[i * 3], w.P[i * 3 + 1])) || [];
       if (!others.some(([o]) => o !== w.k && !WAYS[o].bridge)) continue;
-      mk(w.P[i * 3], w.P[i * 3 + 1], w.P[i * 3 + 2], w.ny[i], -w.nx[i], w.hw);
+      mk(jointOn(w, Math.min(i, w.n - 2), w.P[i * 3], w.P[i * 3 + 1]));
     }
   }
   return out;
 }
-function jointMeshes(list, group) {
-  const steel = new GB(), rubber = new GB();
-  for (const [x, y, z, tx, ty, hw] of list) {
-    const span = hw - 0.25;
-    box(steel, x + tx * 0.17, y + ty * 0.17, tx, ty, 0.12, span, z - 0.03, z + 0.012);
-    box(steel, x - tx * 0.17, y - ty * 0.17, tx, ty, 0.12, span, z - 0.03, z + 0.012);
-    box(rubber, x, y, tx, ty, 0.05, span, z - 0.03, z + 0.004);
+function addJoints(B, list) {
+  for (const j of list) {
+    const nx = -j.ty, ny = j.tx, half = (j.hL + j.hR) / 2 - 0.25, off = (j.hL - j.hR) / 2, cx = j.x + nx * off, cy = j.y + ny * off;
+    const st = B.g('jsteel', cx, cy), rb = B.g('jrubber', cx, cy);
+    box(st, cx + j.tx * 0.17, cy + j.ty * 0.17, j.tx, j.ty, 0.12, half, j.z - 0.03, j.z + 0.012);
+    box(st, cx - j.tx * 0.17, cy - j.ty * 0.17, j.tx, j.ty, 0.12, half, j.z - 0.03, j.z + 0.012);
+    box(rb, cx, cy, j.tx, j.ty, 0.05, half, j.z - 0.03, j.z + 0.004);
   }
-  for (const m of [steel.mesh(matJointSteel), rubber.mesh(matJointRubber)]) if (m) group.add(m);
 }
-/** 車軸從 (ax,ay) 移到 (bx,by) 時有沒有壓過伸縮縫 */
+/** 車軸從 (ax,ay) 移到 (bx,by) 時有沒有壓過伸縮縫 (左右範圍分開算) */
 function crossedJoint(ax, ay, bx, by, z) {
   const a = JGRID.get(Math.floor(bx / JCELL) * 100003 + Math.floor(by / JCELL));
   if (!a) return false;
@@ -1743,71 +1945,18 @@ function crossedJoint(ax, ay, bx, by, z) {
     const d0 = (ax - j.x) * j.tx + (ay - j.y) * j.ty, d1 = (bx - j.x) * j.tx + (by - j.y) * j.ty;
     if (d0 * d1 > 0 || d0 === d1) continue;
     const lat = (bx - j.x) * -j.ty + (by - j.y) * j.tx;
-    if (Math.abs(lat) <= j.hw) return true;
+    if (lat <= j.hL && -lat <= j.hR) return true;
   }
   return false;
 }
 
-/** 反光片一支: 底座 (橢圓) → 支柱 (含束環) → 黑色圓框 → 黃色反光面 (面向 -t，也就是迎著來車)；(x, y, z0) 是護欄頂 */
-function addReflector(c, x, y, z0, tx, ty) {
-  const K = c.reflBlack, F = c.reflFace, nx = -ty, ny = tx;
-  // 橢圓底座: 12 邊形壓扁
-  const b0 = K.n, seg = 12;
-  for (const zz of [z0, z0 + 0.018]) for (let i = 0; i < seg; i++) { const a = i / seg * Math.PI * 2; K.v(x + tx * Math.cos(a) * 0.085 + nx * Math.sin(a) * 0.055, y + ty * Math.cos(a) * 0.085 + ny * Math.sin(a) * 0.055, zz); }
-  for (let i = 0; i < seg; i++) { const j = (i + 1) % seg; K.q(b0 + i, b0 + j, b0 + seg + j, b0 + seg + i); K.i.push(b0 + seg, b0 + seg + j, b0 + seg + i); }
-  box(K, x, y, tx, ty, 0.022, 0.022, z0 + 0.018, z0 + 0.15);            // 支柱
-  box(K, x, y, tx, ty, 0.03, 0.03, z0 + 0.07, z0 + 0.11);               // 束環
-  const zc = z0 + 0.24;
-  disc(K, x, y, zc, tx, ty, 0.1, 0.034, 20);                            // 黑色圓框
-  // 黃色反光面 (略突出在圓框前方 = 迎向來車那一面)
-  const fx = x - tx * 0.019, fy = y - ty * 0.019, r = 0.083, fs = 24, f0 = F.n;
-  F.v(fx, fy, zc); F.uv.push(0, 0);
-  for (let i = 0; i < fs; i++) { const a = i / fs * Math.PI * 2; F.v(fx + nx * Math.cos(a) * r, fy + ny * Math.cos(a) * r, zc + Math.sin(a) * r); F.uv.push(Math.cos(a), Math.sin(a)); }
-  for (let i = 0; i < fs; i++) F.i.push(f0, f0 + 1 + ((i + 1) % fs), f0 + 1 + i);
-  // 遠處的反光點 (位置 + 面向)
-  c.rglow.push(fx, zc, -fy); c.rnorm.push(-tx, 0, ty);
-}
-/** 圓片 (軸沿路線方向 tx,ty，面向來車)：中心 (cx, cy, cz)、半徑 r、厚 th */
-function disc(g, cx, cy, cz, tx, ty, r, th, seg = 12) {
-  const nx = -ty, ny = tx, b = g.n;
-  for (const f of [-1, 1]) {   // 前後兩個圓面 (中心 + 外圈)
-    const ox = cx + tx * th * 0.5 * f, oy = cy + ty * th * 0.5 * f;
-    g.v(ox, oy, cz);
-    for (let i = 0; i < seg; i++) { const a = i / seg * Math.PI * 2; g.v(ox + nx * Math.cos(a) * r, oy + ny * Math.cos(a) * r, cz + Math.sin(a) * r); }
-  }
-  const back = b, front = b + seg + 1;
-  for (let i = 0; i < seg; i++) {
-    const j = (i + 1) % seg;
-    g.i.push(back, back + 1 + j, back + 1 + i);
-    g.i.push(front, front + 1 + i, front + 1 + j);
-    g.q(back + 1 + i, back + 1 + j, front + 1 + j, front + 1 + i);   // 側邊
-  }
-}
-function box(g, cx, cy, tx, ty, hx, hy, z0, z1) {
-  // tx,ty: 沿線方向；法向 = (-ty, tx)
-  const nx = -ty, ny = tx;
-  const corner = (sx, sy, z) => g.v(cx + tx * sx * hx + nx * sy * hy, cy + ty * sx * hx + ny * sy * hy, z);
-  const faces = [
-    [[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]].reverse(),
-    [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
-    [[-1, -1, 0], [1, -1, 0], [1, -1, 1], [-1, -1, 1]],
-    [[1, -1, 0], [1, 1, 0], [1, 1, 1], [1, -1, 1]],
-    [[1, 1, 0], [-1, 1, 0], [-1, 1, 1], [1, 1, 1]],
-    [[-1, 1, 0], [-1, -1, 0], [-1, -1, 1], [-1, 1, 1]],
-  ];
-  for (const f of faces) {
-    const idx = f.map(([sx, sy, zz]) => corner(sx, sy, zz ? z1 : z0));
-    g.q(idx[0], idx[1], idx[2], idx[3]);
-  }
-}
-
+// ======================================================================= 橋墩
 /** 橋墩 (前處理已避開下層道路): 柱子可能往側邊偏移，帽梁延伸過去撐住橋面 */
-function addPier(g, A, k) {
-  const q = A.subarray(k * 9, k * 9 + 9);
-  let [x, y, tx, ty, offL, zg, top, capL, capR] = q;
-  const nx = -ty, ny = tx;
-  box(g, x + nx * offL, y + ny * offL, tx, ty, 1.0, 1.25, zg - 1.0, top - 1.4);            // 柱
-  // 國道路肩加寬後橋面變寬: 帽梁兩端跟著加長 (橋墩方向可能跟路線相反，用左法向判斷哪一端在路面哪一側)
+function addPier(B, A, k) {
+  let [x, y, tx, ty, offL, zg, top, capL, capR] = A.subarray(k * 9, k * 9 + 9);
+  const nx = -ty, ny = tx, g = B.g('pier', x, y);
+  box(g, x + nx * offL, y + ny * offL, tx, ty, 1.0, 1.25, zg - 1.0, top - 1.4);   // 柱
+  // 國道路肩加寬後橋面變寬: 帽梁兩端跟著加長 (橋墩方向可能跟路線相反)
   const r = roadAt(x, y, top + 0.2, -3, 1.0);
   if (r && r.w.eL) {
     const same = r.w.nx[r.i] * nx + r.w.ny[r.i] * ny > 0, eL = r.w.eL[r.i], eR = r.w.eR[r.i];
@@ -1815,12 +1964,11 @@ function addPier(g, A, k) {
     capR += same ? eL : eR; capL -= same ? eR : eL;
   }
   const mid = (capL + capR) / 2;
-  box(g, x + nx * mid, y + ny * mid, tx, ty, 0.9, (capR - capL) / 2, top - 1.4, top);      // 帽梁
+  box(g, x + nx * mid, y + ny * mid, tx, ty, 0.9, (capR - capL) / 2, top - 1.4, top);   // 帽梁
 }
 
-/** 隧道口: 端點沒有接另一段隧道 */
+// ======================================================================= 隧道
 const isTunnelEnd = (w, i) => !(PT_INDEX.get(ptKey(w.P[i * 3], w.P[i * 3 + 1])) || []).some(([k]) => k !== w.k && WAYS[k].tunnel);
-
 /** 隧道內壁斷面 [橫向 (左正), 高度]：路緣 → 檢修步道 → 直牆 2.9 m → 橢圓拱頂 (頂高 7.2 m) → 另一側 */
 function tunnelProfile(hw) {
   const a = hw + 0.9, H = 7.2, Hw = 2.9, out = [[-hw, 0], [-hw, 0.25], [-a, 0.25], [-a, Hw]];
@@ -1828,49 +1976,41 @@ function tunnelProfile(hw) {
   out.push([a, Hw], [a, 0.25], [hw, 0.25], [hw, 0]);
   return { pts: out, a, H, Hw };
 }
-function addTunnel(c, w) {
+function addTunnel(B, w) {
   const { P, nx, ny, n, hw, s } = w;
   const { pts, a, H, Hw } = tunnelProfile(hw), M = pts.length;
-  const g = c.tunnel, g0 = g.n;
-  for (let i = 0; i < n; i++) for (const [lat, up] of pts) {
-    g.v(P[i * 3] + nx[i] * lat, P[i * 3 + 1] + ny[i] * lat, P[i * 3 + 2] + up); g.uv.push(s[i], up);
-  }
-  for (let i = 0; i < n - 1; i++) for (let j = 0; j < M - 1; j++) { const q = g0 + i * M + j; g.q(q, q + M, q + M + 1, q + 1); }
-  // 兩排隧道燈 (拱頂兩側 45°)，每 3 m 一盞
+  const st = new Strip(B, 'tunnel', pts.slice(0, -1).map((_, j) => [j + 1, j]));
+  for (let i = 0; i < n; i++) st.add(pts.map(([lat, up]) => [P[i * 3] + nx[i] * lat, P[i * 3 + 1] + ny[i] * lat, P[i * 3 + 2] + up, s[i], up]));
+  // 兩排隧道燈 (拱頂兩側 45°)，每 3 m 一盞；消防箱每 51 m 一個 (右側牆面)
   const th = Math.PI / 4, lampLat = Math.sin(th) * a * 0.97, lampUp = Hw + Math.cos(th) * (H - Hw) * 0.97;
-  for (let d = 1.5; d < s[n - 1]; d += 3) {
-    let k = 0; while (k < n - 2 && s[k + 1] < d) k++;
-    const t = (d - s[k]) / ((s[k + 1] - s[k]) || 1);
-    const x = P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, y = P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t, z = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t;
-    for (const sd of [-1, 1]) box(c.tlight, x + nx[k] * lampLat * sd, y + ny[k] * lampLat * sd, ny[k], -nx[k], 0.6, 0.16, z + lampUp - 0.08, z + lampUp + 0.04);
-    if (Math.round(d / 3) % 17 === 0) {   // 消防箱: 每 51 m 一個，右側牆面
-      const cx = x - nx[k] * (a - 0.09), cy = y - ny[k] * (a - 0.09);
-      box(c.tcab, cx, cy, ny[k], -nx[k], 0.4, 0.09, z + 0.85, z + 1.85);
+  for (let d = 1.5, k = 0; d < s[n - 1]; d += 3) {
+    const p = along(w, d, k); k = p.k;
+    for (const sd of [-1, 1]) { const lx = p.x + nx[k] * lampLat * sd, ly = p.y + ny[k] * lampLat * sd; box(B.g('tlight', lx, ly), lx, ly, ny[k], -nx[k], 0.6, 0.16, p.z + lampUp - 0.08, p.z + lampUp + 0.04); }
+    if (Math.round(d / 3) % 17 === 0) {
+      const cx = p.x - nx[k] * (a - 0.09), cy = p.y - ny[k] * (a - 0.09);
+      box(B.g('tcab', cx, cy), cx, cy, ny[k], -nx[k], 0.4, 0.09, p.z + 0.85, p.z + 1.85);
     }
   }
-  for (const i of [0, n - 1]) if (isTunnelEnd(w, i)) c.portals.push([w, i]);
+  for (const i of [0, n - 1]) if (isTunnelEnd(w, i)) B.chunk(P[i * 3], P[i * 3 + 1]).extra.push(portalMesh(w, i));
 }
-
-/** 隧道洞口 (照國道 3 號街景): 外凸的拱形遮罩 (洞口往外延伸 3.5 m)、上方弧形鐵欄杆、兩側白底彩色波浪擋土牆 */
+/** 隧道洞口 (照國道 3 號街景): 外凸的拱形遮罩、上方弧形鐵欄杆、兩側白底彩色波浪擋土牆 */
 function portalMesh(w, i) {
   const { pts, a, H } = tunnelProfile(w.hw);
-  const LH = 3.5, T0 = 0.7;                        // 遮罩長度、厚度
-  const kx = (a + T0) / a, ky = (H + T0) / H;
+  const LH = 3.5, T0 = 0.7, kx = (a + T0) / a, ky = (H + T0) / H;
   const outer = pts.map(([l, u]) => [l * (Math.abs(l) > w.hw + 0.5 ? kx : 1), u * ky]);
   // 區域座標: GB.v(橫向, -外推距離, 高度) -> three (橫向, 高度, 外推)
   const g = new GB(), M = pts.length;
   const ring = (P, zl) => { const b = g.n; for (const [l, u] of P) g.v(l, -zl, u); return b; };
   const i0 = ring(pts, 0), i1 = ring(pts, LH), o0 = ring(outer, -0.4), o1 = ring(outer, LH);
   for (let j = 0; j < M - 1; j++) {
-    g.q(i0 + j, i1 + j, i1 + j + 1, i0 + j + 1);   // 內面
-    g.q(o0 + j, o0 + j + 1, o1 + j + 1, o1 + j);   // 外面
-    g.q(i1 + j, o1 + j, o1 + j + 1, i1 + j + 1);   // 前端環
+    g.q(i0 + j, i1 + j, i1 + j + 1, i0 + j + 1);
+    g.q(o0 + j, o0 + j + 1, o1 + j + 1, o1 + j);
+    g.q(i1 + j, o1 + j, o1 + j + 1, i1 + j + 1);
   }
   const grp = new T.Group();
-  const hood = g.mesh(matConcrete, { cast: true }); grp.add(hood);
+  grp.add(g.mesh(matConcrete, { cast: true }));
   // 擋土牆 (梯形，中間挖遮罩的外形)
-  const W = a + 10;
-  const sh = new T.Shape();
+  const W = a + 10, sh = new T.Shape();
   sh.moveTo(-W, -1.5); sh.lineTo(W, -1.5); sh.lineTo(W, 4.4); sh.lineTo(a + 1.5, H + 2.4); sh.lineTo(-(a + 1.5), H + 2.4); sh.lineTo(-W, 4.4); sh.lineTo(-W, -1.5);
   const hole = new T.Path();
   hole.moveTo(outer[0][0], -0.2);
@@ -1880,42 +2020,34 @@ function portalMesh(w, i) {
   const fg = new T.ExtrudeGeometry(sh, { depth: 1.0, bevelEnabled: false, curveSegments: 4 });
   fg.translate(0, 0, -1.0);
   const face = new T.Mesh(fg, matConcrete); face.castShadow = face.receiveShadow = true; face.matrixAutoUpdate = false; grp.add(face);
-  // 兩側翼牆: 沿道路往外 28 m，洞口處 5 m 高、往外降到 1 m；內面 (面向道路) 畫彩色波浪
-  const ww = new GB('uv'), WL = 28, steps = 14;
-  const hAt = (zl) => Math.max(1.0, 5.0 - 4.0 * zl / WL);
-  // 牆底往下接到地面 (洞口外常直接接高架橋，牆不能懸空)
+  // 兩側翼牆: 沿道路往外 28 m，洞口處 5 m 高、往外降到 1 m；內面畫彩色波浪；牆底接到地面
+  const ww = new GB('uv'), WL = 28, steps = 14, hAt = (zl) => Math.max(1.0, 5.0 - 4.0 * zl / WL);
   const px0 = w.P[i * 3], py0 = w.P[i * 3 + 1], pz0 = w.P[i * 3 + 2], sg = i === 0 ? -1 : 1;
   const Xd = [w.nx[i] * sg, w.ny[i] * sg], Zd = [w.ny[i] * sg, -w.nx[i] * sg];
   const baseAt = (lat, zl) => Math.min(-0.3, terrainAt(px0 + Xd[0] * lat + Zd[0] * zl, py0 + Xd[1] * lat + Zd[1] * zl) - pz0 - 0.5);
   for (const sd of [-1, 1]) {
     const xi = sd * (a + 0.15), xo = sd * (a + 0.7);
-    const strip = (x, face, z0) => {
+    const strip = (x, f, z0) => {
       const b = ww.n;
-      for (let k = 0; k <= steps; k++) {
-        const zl = WL * k / steps, h = hAt(zl);
-        ww.v(x, -zl, Math.max(z0, baseAt(x, zl))); ww.uv.push(face, h);
-        ww.v(x, -zl, h); ww.uv.push(face, h);
-      }
+      for (let k = 0; k <= steps; k++) { const zl = WL * k / steps, h = hAt(zl); ww.v(x, -zl, Math.max(z0, baseAt(x, zl))); ww.uv.push(f, h); ww.v(x, -zl, h); ww.uv.push(f, h); }
       return b;
     };
     const fi = strip(xi, 1, -60), fo = strip(xo, 0, -60);
     for (let k = 0; k < steps; k++) {
-      ww.q(fi + k * 2, fi + k * 2 + 2, fi + k * 2 + 3, fi + k * 2 + 1);   // 內面
-      ww.q(fo + k * 2, fo + k * 2 + 1, fo + k * 2 + 3, fo + k * 2 + 2);   // 外面
-      ww.q(fi + k * 2 + 1, fi + k * 2 + 3, fo + k * 2 + 3, fo + k * 2 + 1); // 頂面
+      ww.q(fi + k * 2, fi + k * 2 + 2, fi + k * 2 + 3, fi + k * 2 + 1);
+      ww.q(fo + k * 2, fo + k * 2 + 1, fo + k * 2 + 3, fo + k * 2 + 2);
+      ww.q(fi + k * 2 + 1, fi + k * 2 + 3, fo + k * 2 + 3, fo + k * 2 + 1);
     }
-    const e = steps * 2;   // 末端封口
+    const e = steps * 2;
     ww.q(fi + e, fo + e, fo + e + 1, fi + e + 1);
   }
   const wing = ww.mesh(matPortal, { cast: true }); if (wing) grp.add(wing);
   // 弧形欄杆: 沿遮罩前端頂部，立柱每 1.1 m、上下兩根橫桿
-  const r = new GB();
-  const arch = outer.filter(([l, u]) => u > H * 0.55);
+  const r = new GB(), arch = outer.filter(([, u]) => u > H * 0.55);
   const post = (l, u, zl) => box(r, l, -zl, 1, 0, 0.025, 0.025, u, u + 1.05);
-  const beam = (p, q, zl, dz) => {   // p, q: [橫向, 高度] 兩點之間的細桿
-    const dl = q[0] - p[0], du = q[1] - p[1], L = Math.hypot(dl, du) || 1;
-    const nl = -du / L * 0.022, nu = dl / L * 0.022, b = r.n;
-    for (const [aa, bb] of [[p, 0], [q, 0]]) for (const [sl, su, sz] of [[1, 1, 1], [-1, -1, 1], [-1, -1, -1], [1, 1, -1]]) r.v(aa[0] + nl * sl, -(zl + 0.022 * sz), aa[1] + dz + nu * su);
+  const beam = (p, q, zl, dz) => {
+    const dl = q[0] - p[0], du = q[1] - p[1], L = Math.hypot(dl, du) || 1, nl = -du / L * 0.022, nu = dl / L * 0.022, b = r.n;
+    for (const aa of [p, q]) for (const [sl, su, sz] of [[1, 1, 1], [-1, -1, 1], [-1, -1, -1], [1, 1, -1]]) r.v(aa[0] + nl * sl, -(zl + 0.022 * sz), aa[1] + dz + nu * su);
     for (let f = 0; f < 4; f++) { const f2 = (f + 1) % 4; r.q(b + f, b + f2, b + 4 + f2, b + 4 + f); }
   };
   const zl = LH - 0.3;
@@ -1927,55 +2059,106 @@ function portalMesh(w, i) {
   const rail = r.mesh(matRail, { cast: true }); if (rail) grp.add(rail);
   // 擺到洞口: 外推方向 = 離開隧道的方向
   const x = w.P[i * 3], y = w.P[i * 3 + 1], z = w.P[i * 3 + 2];
-  const sgn = i === 0 ? -1 : 1;
-  const Z = new T.Vector3(w.ny[i] * sgn, 0, w.nx[i] * sgn);          // 外推 (three)
-  const Y = new T.Vector3(0, 1, 0), X = new T.Vector3().crossVectors(Y, Z);
+  const Z = new T.Vector3(w.ny[i] * sg, 0, w.nx[i] * sg), Y = new T.Vector3(0, 1, 0), X = new T.Vector3().crossVectors(Y, Z);
   const mtx = new T.Matrix4().makeBasis(X, Y, Z); mtx.setPosition(x, z, -y);
   grp.matrixAutoUpdate = false; grp.matrix.copy(mtx);
   return grp;
 }
 
-const newChunk = () => ({ road: new GB('road'), city: new GB('road'), skirt: new GB(), barrier: new GB('uv'), glare: new GB(), lampPole: new GB(), lampHead: new GB(), glows: [], reflBlack: new GB(), reflFace: new GB('uv'), rglow: [], rnorm: [], reflR: new GB(), reflY: new GB(),
-  gore: new GB('road'), gpost: new GB(), gband: new GB(), drum: new GB(), drumb: new GB(),
-  pier: new GB(), tunnel: new GB('uv'), tlight: new GB(), tcab: new GB(), portals: [],
-  swall: new GB(), sglass: new GB(), spost: new GB(), bboard: new GB('uv'), bback: new GB(), bpole: new GB() });
-
-/** 一般道路: 鋪在地形上的路面 (市區標線由材質依 aLs=路寬、aLanes=車道代碼 算出)；橋梁加梁身與橋墩 */
-function addCityRoad(c, w) {
+// ======================================================================= 一般道路
+/** 鋪在地形上的路面 (市區標線由材質依 aLs=路寬、aLanes=車道代碼 算出)；橋梁加梁身與橋墩 */
+function addCityRoad(B, w) {
   const { P, nx, ny, s, n, hw } = w;
   const code = w.cls === 5 ? 0 : (w.oneway ? w.lanes : -w.lanes);   // 0: 巷道無標線；負: 雙向 (中央雙黃線)
-  const r = c.city, b0 = r.n;
+  const r = new Strip(B, 'city', [[0, 1]]);
   for (let i = 0; i < n; i++) {
     const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-    r.v(x + nx[i] * hw, y + ny[i] * hw, z); r.uv.push(0, s[i]); r.ls.push(w.width); r.ln.push(code);
-    r.v(x - nx[i] * hw, y - ny[i] * hw, z); r.uv.push(w.width, s[i]); r.ls.push(w.width); r.ln.push(code);
+    r.add([[x + nx[i] * hw, y + ny[i] * hw, z, 0, s[i], w.width, code], [x - nx[i] * hw, y - ny[i] * hw, z, w.width, s[i], w.width, code]]);
   }
-  for (let i = 0; i < n - 1; i++) { const a = b0 + i * 2; r.q(a, a + 1, a + 3, a + 2); }
   if (!w.bridge) return;
-  const k = c.skirt, s0 = k.n, depth = 1.6;
+  const depth = 1.6, sl = new Strip(B, 'skirt', [[1, 0]]), sr = new Strip(B, 'skirt', [[0, 1]]), sb = new Strip(B, 'skirt', [[1, 0]]);
   for (let i = 0; i < n; i++) {
-    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-    k.v(x + nx[i] * hw, y + ny[i] * hw, z); k.v(x - nx[i] * hw, y - ny[i] * hw, z);
-    k.v(x + nx[i] * hw, y + ny[i] * hw, z - depth); k.v(x - nx[i] * hw, y - ny[i] * hw, z - depth);
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], lx = x + nx[i] * hw, ly = y + ny[i] * hw, rx = x - nx[i] * hw, ry = y - ny[i] * hw;
+    sl.add([[lx, ly, z], [lx, ly, z - depth]]); sr.add([[rx, ry, z], [rx, ry, z - depth]]); sb.add([[lx, ly, z - depth], [rx, ry, z - depth]]);
   }
-  for (let i = 0; i < n - 1; i++) {
-    const a = s0 + i * 4, bb = a + 4;
-    k.q(a, bb, bb + 2, a + 2); k.q(a + 1, a + 3, bb + 3, bb + 1); k.q(a + 2, bb + 2, bb + 3, a + 3);
-  }
-  for (let d = 15; d < s[n - 1] - 5; d += 30) {
-    let i = 0; while (i < n - 2 && s[i + 1] < d) i++;
-    const x = P[i * 3], y = P[i * 3 + 1], top = P[i * 3 + 2] - depth, g = terrainAt(x, y);
-    if (top - g > 3) box(c.pier, x, y, ny[i], -nx[i], 0.7, Math.min(hw * 0.6, 3), g - 1, top);
+  for (let d = 15, k = 0; d < s[n - 1] - 5; d += 30) {
+    while (k < n - 2 && s[k + 1] < d) k++;
+    const x = P[k * 3], y = P[k * 3 + 1], top = P[k * 3 + 2] - depth, g = terrainAt(x, y);
+    if (top - g > 3) box(B.g('pier', x, y), x, y, ny[k], -nx[k], 0.7, Math.min(hw * 0.6, 3), g - 1, top);
   }
 }
+
+// ======================================================================= 3D 建築: 依 OSM 高度擠出；牆面 UV (沿周長 m, 高度 m, 總高) 給窗戶材質用
+const FACADE = [[0.45, 0.40, 0.32], [0.42, 0.42, 0.40], [0.55, 0.54, 0.50], [0.28, 0.19, 0.13], [0.30, 0.30, 0.29], [0.48, 0.37, 0.33], [0.25, 0.29, 0.33]];
+const R_BLD = (MOBILE ? 1600 : 4500) + 700;
+function* buildBuildings(bld, out) {
+  const { bxy, bbase, bh, bcnt, bcol, nb } = bld;
+  const chunks = new Map(), CHB = 1000;
+  let o = 0;
+  for (let b = 0; b < nb; b++) {
+    const n = bcnt[b], base = bbase[b], top = base + bh[b], col = FACADE[bcol[b]];
+    let cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) { cx += bxy[(o + i) * 2]; cy += bxy[(o + i) * 2 + 1]; }
+    cx /= n; cy /= n;
+    const key = Math.floor(cx / CHB) + ',' + Math.floor(cy / CHB);
+    let c = chunks.get(key);
+    if (!c) chunks.set(key, c = { x: (Math.floor(cx / CHB) + 0.5) * CHB, y: (Math.floor(cy / CHB) + 0.5) * CHB, wp: [], wuv: [], wcol: [], wi: [], rp: [], rcol: [], ri: [] });
+    let per = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const ax = bxy[(o + i) * 2], ay = bxy[(o + i) * 2 + 1], bx = bxy[(o + j) * 2], by = bxy[(o + j) * 2 + 1], L = Math.hypot(bx - ax, by - ay);
+      const v0 = c.wp.length / 3;
+      c.wp.push(ax, base, -ay, bx, base, -by, bx, top, -by, ax, top, -ay);
+      c.wuv.push(per, 0, bh[b], per + L, 0, bh[b], per + L, bh[b], bh[b], per, bh[b], bh[b]);
+      for (let q = 0; q < 4; q++) c.wcol.push(col[0], col[1], col[2]);
+      c.wi.push(v0, v0 + 1, v0 + 2, v0, v0 + 2, v0 + 3);
+      per += L;
+    }
+    const contour = [];
+    for (let i = 0; i < n; i++) contour.push(new T.Vector2(bxy[(o + i) * 2], bxy[(o + i) * 2 + 1]));
+    const tris = T.ShapeUtils.triangulateShape(contour.slice(), []);
+    const r0 = c.rp.length / 3;
+    for (let i = 0; i < n; i++) { c.rp.push(contour[i].x, top, -contour[i].y); c.rcol.push(col[0] * 0.6, col[1] * 0.6, col[2] * 0.6); }
+    for (const t of tris) c.ri.push(r0 + t[0], r0 + t[2], r0 + t[1]);
+    o += n;
+    if ((b & 255) === 255) yield;
+  }
+  const mk = (p, idx, attrs, mat) => {
+    const g = new T.BufferGeometry();
+    g.setAttribute('position', new T.Float32BufferAttribute(p, 3));
+    for (const [k, v, sz] of attrs) g.setAttribute(k, new T.Float32BufferAttribute(v, sz));
+    g.setIndex(p.length / 3 > 65535 ? new T.Uint32BufferAttribute(idx, 1) : new T.Uint16BufferAttribute(idx, 1));
+    g.computeVertexNormals(); g.computeBoundingSphere();
+    const m = new T.Mesh(g, mat); m.castShadow = false; m.receiveShadow = true; m.matrixAutoUpdate = false;
+    return m;
+  };
+  for (const c of chunks.values()) {
+    out.push({ x: c.x, y: c.y, r: CHB * 0.75, kind: 'bld', meshes: [mk(c.wp, c.wi, [['aUv3', c.wuv, 3], ['aCol', c.wcol, 3]], matWall), mk(c.rp, c.ri, [['aCol', c.rcol, 3]], matRoof)], cast: true });
+    yield;
+  }
+}
+
+// ======================================================================= 工作排程: 建模分段做，每幀最多 BUDGET_MS
+const BUDGET_MS = +(params.get('budget') || (MOBILE ? 3 : 5));
+const JOBS = [];   // { gen, prio }
+function addJob(gen, prio = 0) { JOBS.push({ gen, prio }); JOBS.sort((a, b) => a.prio - b.prio); }
+function runJobs(budget = BUDGET_MS) {
+  const t0 = performance.now();
+  while (JOBS.length && performance.now() - t0 < budget) {
+    const j = JOBS[0];
+    if (j.gen.next().done) JOBS.shift();
+  }
+}
+/** 立刻做完所有排隊的建模 (起點、傳送) */
+function flushJobs() { while (JOBS.length) { const j = JOBS.shift(); while (!j.gen.next().done); } }
 
 // ======================================================================= 分區串流
 // 車子附近: 先下載資料 (DATA_R)，鄰近 8 區的資料都到了才建模型 (MESH_R)，遠了丟掉模型 (資料留著，回來不用重下載)
 const MESH_R = +(params.get('meshr') || (MOBILE ? 4200 : 7000));
-const DATA_R = MESH_R + TS * 1.45;            // 模型區的鄰區一定已經有資料
+const DATA_R = MESH_R + TS * 1.45;
 const TERR_R = +(params.get('terrr') || (MOBILE ? 9000 : 18000));
-const TILES = new Map();                       // 細節分區 key -> { key, tx, ty, state, ways, piers, bld, linked, joints, group, bldChunks }
-const TERR_REC = new Map();                    // 地形分區 key -> { state, mesh }
+const TILES = new Map();                       // 細節分區 key -> { key, tx, ty, state, ways, piers, bld, linked, joints, group, chunks, building }
+const TERR_REC = new Map();                    // 地形分區 key -> { state, mesh, lod, building, ortho }
 let inflight = 0;
 const worldGroup = new T.Group();
 scene.add(worldGroup);
@@ -2002,29 +2185,28 @@ function whenBuf(kind, key, onOk, onErr) {
 }
 function requestDetail(key, tx, ty) {
   if (TILES.has(key) || !INDEX.detail[key]) return null;
-  const rec = { key, tx, ty, state: 'loading', ways: [], piers: new Float32Array(0), bld: null, linked: false, joints: [], group: null, bldChunks: [] };
+  const rec = { key, tx, ty, state: 'loading', ways: [], piers: new Float32Array(0), bld: null, linked: false, joints: [], group: null, chunks: [], building: false };
   TILES.set(key, rec);
   return whenBuf('d', key, (buf) => {
     Object.assign(rec, ingestDetail(buf));
     rec.state = 'data';
-    // 有隧道: 周圍已建好的地形網格重建 (挖掉穿進隧道的山坡，見 buildTerrainMesh)
+    // 有隧道: 周圍已建好的地形網格重建 (挖掉穿進隧道的山坡)
     if (rec.ways.some((k) => WAYS[k].tunnel)) for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
       const tr = TERR_REC.get(tkey(tx + dx, ty + dy));
-      if (tr && tr.mesh) { if (tr.mesh !== 'none') disposeGroup(tr.mesh); tr.mesh = null; }
+      if (tr) tr.dirty = true;
     }
     for (const f of HOOKS.tile) f(rec);
   }, (e) => { console.warn('分區載入失敗', key, e); setTimeout(() => TILES.delete(key), 3000); });
 }
 function requestTerrain(key) {
   if (TERR_REC.has(key) || !INDEX.tiles_t[key]) return null;
-  const rec = { state: 'loading', mesh: null };
+  const rec = { state: 'loading', mesh: null, lod: -1, building: false, ortho: null };
   TERR_REC.set(key, rec);
   return whenBuf('t', key, (buf) => {
     TERR.set(key, new Int16Array(buf, 0, TN * TN));
     if (buf.byteLength >= TN * TN * 3) LCLS.set(key, new Uint8Array(buf, TN * TN * 2, TN * TN));   // 地表分類 (scripts/landcover.py)
     rec.state = 'data';
-  },
-    (e) => { console.warn('地形載入失敗', key, e); setTimeout(() => TERR_REC.delete(key), 3000); });
+  }, (e) => { console.warn('地形載入失敗', key, e); setTimeout(() => TERR_REC.delete(key), 3000); });
 }
 function neighborsReady(rec) {
   for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
@@ -2035,163 +2217,135 @@ function neighborsReady(rec) {
   }
   return true;
 }
-function buildTile(rec) {
-  const c = newChunk(), g = new T.Group();
-  for (const k of rec.ways) { const w = WAYS[k]; if (w.city) addCityRoad(c, w); else { addRoad(c, w); if (w.ramps && !params.has('nogore')) for (const r of w.ramps) addGore(c, w, r); } }
-  for (let k = 0; k < rec.piers.length / 9; k++) addPier(c.pier, rec.piers, k);
-  for (const m of [c.road.mesh(matAsphalt, { cast: true }), (params.has('nocr') ? null : c.city.mesh(matCityRoad)), c.skirt.mesh(matConcrete, { cast: true }),
-                   c.barrier.mesh(matBarrier, { cast: true }), c.glare.mesh(matGlare, { cast: true }), c.lampPole.mesh(matLampPole, { cast: true }), c.lampHead.mesh(matLampHead), c.pier.mesh(matConcrete, { cast: true }),
-                   c.gore.mesh(matGore), c.gpost.mesh(matPost, { cast: true }), c.gband.mesh(matPostBand), c.drum.mesh(matDrum, { cast: true }), c.drumb.mesh(matDrumBand),
-                   c.tunnel.mesh(matTunnelWall, { cast: true }), c.tlight.mesh(matTunnelLight, { receive: false }), c.tcab.mesh(matCabinet),
-                   c.reflR.mesh(matReflR, { receive: false }), c.reflY.mesh(matReflY, { receive: false }), c.reflBlack.mesh(matReflBlack), c.reflFace.mesh(matRetro, { receive: false }),
-                   c.swall.mesh(matSoundWall, { cast: true }), c.sglass.mesh(matSoundGlass, { receive: false }), c.spost.mesh(matLampPole, { cast: true }),
-                   withUv(c.bboard.mesh(matBillboard)), c.bback.mesh(matBillboardBack, { cast: true }), c.bpole.mesh(matLampPole, { cast: true })]) if (m) g.add(m);
-  for (const [w, i] of c.portals) g.add(portalMesh(w, i));
-  if (c.rglow.length && params.has('rglow')) {   // 遠方反光點: 預設關閉 (晚上遠處高架橋看不見時，光點像飄在空中)
-    const rg = new T.BufferGeometry();
-    rg.setAttribute('position', new T.Float32BufferAttribute(c.rglow, 3)); rg.setAttribute('aN', new T.Float32BufferAttribute(c.rnorm, 3)); rg.computeBoundingSphere();
-    const rp = new T.Points(rg, matRetroGlow); rp.matrixAutoUpdate = false; g.add(rp);
-  }
-  if (c.glows.length) {
-    const pg = new T.BufferGeometry(); pg.setAttribute('position', new T.Float32BufferAttribute(c.glows, 3)); pg.computeBoundingSphere();
-    const pts = new T.Points(pg, GLOW_LAMP); pts.matrixAutoUpdate = false; g.add(pts);
-  }
-  jointMeshes(rec.joints, g);
-  rec.bldChunks = (rec.bld && !params.has('nobld')) ? buildBuildings(rec.bld, g) : [];   // nobld: 測試用，不建建築
-  worldGroup.add(g);
-  rec.group = g;
+function disposeObj(o) {
+  if (o.parent) o.parent.remove(o);
+  o.traverse((q) => { if (q.geometry) q.geometry.dispose(); });
 }
-function disposeGroup(g) {
-  if (g.parent) g.parent.remove(g);
-  g.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
-}
-// ---- 地面正射影像 (國土測繪中心 WMTS，政府資料開放授權，畫面下方標示來源)
-// 玩家附近 (電腦 8 km、手機 5 km) 的地形分區各拼一張貼圖；全部圖磚都抓到才換上 (離線、抓不到就維持原本的地表上色)
-// 解析度分兩級: 玩家所在 / 相鄰分區 (1.5 km 內) 用高一級 (電腦 z15 ≈ 4.3 m/像素)，再遠用 z14；手機各低一級
-const ORTHO = { on: !params.has('noortho'), zNear: MOBILE ? 14 : 15, zFar: MOBILE ? 13 : 14, nearR: 1500, R: MOBILE ? 5000 : 8000, busy: 0, clock: 0 };
-const orthoUrl = (z, x, y) => `https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/${z}/${y}/${x}`;
-// 地形分區有水面時是「地形 + 水面」的群組: 取出地形那塊網格
-const terrPart = (m) => (m && m !== 'none') ? (m.isMesh ? m : m.children.find((o) => o.geometry && o.geometry.attributes.aLc0)) : null;
-const merc = (lat, lon, z) => { const n = 2 ** z; return [(lon + 180) / 360 * n, (1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * n]; };
-function orthoApply(r, tx, ty, z) {
-  const toLL = window.TWX && TWX.gpsSync && TWX.gpsSync.toLatLon;
-  const m = r.mesh;
-  if (!toLL || !m || m === 'none') return;
-  r.ortho = 'loading'; ORTHO.busy++;
-  const x0 = tx * TC * TSTEP, y0 = ty * TC * TSTEP, x1 = x0 + TC * TSTEP, y1 = y0 + TC * TSTEP;
-  const c = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].map(([x, y]) => merc(...toLL(x, y), z));
-  const mx0 = Math.floor(Math.min(...c.map((p) => p[0]))), mx1 = Math.floor(Math.max(...c.map((p) => p[0])));
-  const my0 = Math.floor(Math.min(...c.map((p) => p[1]))), my1 = Math.floor(Math.max(...c.map((p) => p[1])));
-  const cols = mx1 - mx0 + 1, rows = my1 - my0 + 1;
-  const jobs = [];
-  for (let yy = my0; yy <= my1; yy++) for (let xx = mx0; xx <= mx1; xx++) jobs.push(new Promise((ok, no) => {
-    const im = new Image(); im.crossOrigin = 'anonymous';
-    im.onload = () => ok([im, xx - mx0, yy - my0]); im.onerror = no; im.src = orthoUrl(z, xx, yy);
-  }));
-  Promise.all(jobs).then((imgs) => {
-    ORTHO.busy--;
-    if (r.mesh !== m) { r.ortho = null; return; }   // 抓圖途中地形已經丟掉
-    const cv = document.createElement('canvas'); cv.width = cols * 256; cv.height = rows * 256;
-    const g2 = cv.getContext('2d');
-    for (const [im, i, j] of imgs) g2.drawImage(im, i * 256, j * 256);
-    const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace; tex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
-    // 每個頂點的貼圖座標: 分區四角的 Web Mercator 座標雙線性內插 (3.84 km 內誤差 < 1 m)
-    const tm = terrPart(m); if (!tm) { r.ortho = 'fail'; return; }
-    const p = tm.geometry.attributes.position.array, uv = new Float32Array(p.length / 3 * 2);
-    for (let k = 0, q = 0; k < p.length; k += 3, q += 2) {
-      const fu = (p[k] - x0) / (x1 - x0), fv = (-p[k + 2] - y0) / (y1 - y0);
-      const mx = (c[0][0] * (1 - fu) + c[1][0] * fu) * (1 - fv) + (c[2][0] * (1 - fu) + c[3][0] * fu) * fv;
-      const my = (c[0][1] * (1 - fu) + c[1][1] * fu) * (1 - fv) + (c[2][1] * (1 - fu) + c[3][1] * fu) * fv;
-      uv[q] = (mx - mx0) / cols; uv[q + 1] = 1 - (my - my0) / rows;
+/** 一個細節分區的模型 (產生器: 每條路段之間可以暫停) */
+function* buildTile(rec) {
+  const B = new Build();
+  for (const k of rec.ways) {
+    const w = WAYS[k];
+    if (w.city) { if (!params.has('nocr')) addCityRoad(B, w); }
+    else { addRoad(B, w); if (w.ramps && !params.has('nogore')) for (const r of w.ramps) addGore(B, w, r); }
+    yield;
+  }
+  for (let k = 0; k < rec.piers.length / 9; k++) addPier(B, rec.piers, k);
+  addJoints(B, rec.joints);
+  yield;
+  // 小塊 -> 網格
+  const g = new T.Group(), chunks = [];
+  for (const c of B.chunks.values()) {
+    const ch = { x: c.x, y: c.y, r: c.r, meshes: [], kinds: [], casts: [] };
+    for (const [cat, gb] of Object.entries(c.gb)) {
+      const [, mat, cast, recv, kind] = CATS[cat];
+      let m = gb.mesh(mat(), { cast: false, receive: !!recv });
+      if (!m) continue;
+      if (cat === 'bboard') withUv(m);
+      g.add(m); ch.meshes.push(m); ch.kinds.push(kind); ch.casts.push(!!cast);
     }
-    tm.geometry.setAttribute('uv', new T.BufferAttribute(uv, 2));
-    const mat = patch(new T.MeshStandardMaterial({ roughness: 0.95, metalness: 0, map: tex }), TERRAIN_SPEC);
-    if (r.prevOrtho) { r.prevOrtho.tex.dispose(); r.prevOrtho.mat.dispose(); r.prevOrtho = null; }   // 換解析度: 新的換上後才丟舊的 (不會閃回原本地表)
-    tm.material = mat; r.ortho = { tex, mat, z };
-  }).catch((e) => { ORTHO.busy--; r.ortho = r.prevOrtho || 'fail'; r.prevOrtho = null; if ((ORTHO.warned = (ORTHO.warned || 0) + 1) <= 3) console.warn('[ortho] 抓不到正射影像，維持原本地表', e && (e.message || e.type || e)); });   // 抓不到 (離線): 維持原本的地表上色
-}
-function orthoDrop(r) {
-  if (r.prevOrtho) { r.prevOrtho.tex.dispose(); r.prevOrtho.mat.dispose(); r.prevOrtho = null; }
-  if (r.ortho && r.ortho.tex) { const tm = terrPart(r.mesh); if (tm) tm.material = matTerrain; r.ortho.tex.dispose(); r.ortho.mat.dispose(); }
-  r.ortho = null;
-}
-function orthoFrame(dt) {
-  if (!ORTHO.on || (ORTHO.clock -= dt) > 0) return;
-  ORTHO.clock = 0.4;
-  let pick = null, pd = 1e9;   // 一次處理一塊: 挑最近、需要換的
-  for (const [key, r] of TERR_REC) {
-    if (!r.mesh || r.mesh === 'none') continue;
-    const [tx, ty] = key.split('_').map(Number);
-    const d = tileDist(tx, ty, S.x, S.y);
-    if (d > ORTHO.R + 3000) { if (r.ortho && r.ortho !== 'loading') orthoDrop(r); continue; }
-    if (d >= ORTHO.R || r.ortho === 'loading' || r.ortho === 'fail') continue;
-    const want = d < ORTHO.nearR ? ORTHO.zNear : (r.ortho && r.ortho.z === ORTHO.zNear && d < ORTHO.nearR + 1500) ? ORTHO.zNear : ORTHO.zFar;   // 遲滯: 離開 3 km 才降級
-    if ((!r.ortho || r.ortho.z !== want) && d < pd) { pd = d; pick = [r, tx, ty, want]; }
+    if (c.glows.length) {
+      const pg = new T.BufferGeometry(); pg.setAttribute('position', new T.Float32BufferAttribute(c.glows, 3)); pg.computeBoundingSphere();
+      const pts = new T.Points(pg, GLOW_LAMP); pts.matrixAutoUpdate = false; g.add(pts); ch.meshes.push(pts); ch.kinds.push('lamp'); ch.casts.push(false);
+    }
+    for (const e of c.extra) { g.add(e); ch.meshes.push(e); ch.kinds.push('base'); ch.casts.push(false); e.traverse((q) => { if (q.isMesh) q.castShadow = false; }); }
+    chunks.push(ch);
+    yield;
   }
-  if (!pick || ORTHO.busy >= 2) return;
-  const [r, tx, ty, want] = pick;
-  if (r.ortho) r.prevOrtho = r.ortho;   // 換解析度: 新的換上前先用舊的
-  orthoApply(r, tx, ty, want);
+  if (rec.bld && !params.has('nobld')) yield* buildBuildings(rec.bld, chunks);
+  for (const ch of chunks) if (ch.kind === 'bld') for (const m of ch.meshes) g.add(m);
+  g.matrixAutoUpdate = false;
+  worldGroup.add(g);
+  rec.group = g; rec.chunks = chunks; rec.building = false;
+  visClock = 0;   // 新模型馬上套用顯示距離
 }
 
-/** 地形分區 (法向由含外框的高度場計算，分區之間沒有接縫) */
-function buildTerrainMesh(key, tx, ty) {
+// ---- 地形 (三級解析度: 30 / 60 / 120 m；分區邊緣加 20 m 深的裙邊蓋住不同解析度之間的縫)
+const LOD_D = MOBILE ? [1800, 4500] : [2500, 6500];
+const lodFor = (d) => d < LOD_D[0] ? 0 : d < LOD_D[1] ? 1 : 2;
+function* buildTerrain(key, tx, ty, lod) {
   const a = TERR.get(key);
   const ja = Math.max(tx * TC, TGI.J0), jb = Math.min(tx * TC + TC, TGI.J0 + TGI.w - 1);
   const ia = Math.max(ty * TC, TGI.I0), ib = Math.min(ty * TC + TC, TGI.I0 + TGI.h - 1);
   if (!a || jb <= ja || ib <= ia) return null;
+  const st = 1 << lod;
   const hh = (I, J) => Z16(a[(I - ty * TC + 1) * TN + (J - tx * TC + 1)]);
   const lc = LCLS.get(key), lcAt = (I, J) => lc ? lc[(I - ty * TC + 1) * TN + (J - tx * TC + 1)] : 0;
+  // 格點 (含分區最後一行；步距不整除時最後一格縮短)
+  const Js = [], Is = [];
+  for (let J = ja; J < jb; J += st) Js.push(J); Js.push(jb);
+  for (let I = ia; I < ib; I += st) Is.push(I); Is.push(ib);
+  const cols = Js.length, rows = Is.length;
   const g = new GB(); g.nrm = [];
-  const cols = jb - ja + 1;
-  const W0 = [], W1 = [];   // 地表分類 one-hot (內插後邊界自然漸變)
-  for (let I = ia; I <= ib; I++) for (let J = ja; J <= jb; J++) {
+  const W0 = [], W1 = [];
+  const vert = (I, J, zOff = 0) => {
     const k = lcAt(I, J), z = hh(I, J);
     W0.push(k === 1 ? 1 : 0, k === 2 ? 1 : 0, k === 3 ? 1 : 0, k === 4 ? 1 : 0);
     W1.push(k === 5 ? 1 : 0, k === 6 ? 1 : 0, k === 7 ? 1 : 0, k === 8 ? 1 : 0);
-    g.v(J * TSTEP, I * TSTEP, k === 1 ? Math.min(z, 0.4) - (z < 0.6 ? 3 : 1.8) : z);   // 水底壓低，水面才看得到
-    const hx = (hh(I, J + 1) - hh(I, J - 1)) / (2 * TSTEP), hy = (hh(I + 1, J) - hh(I - 1, J)) / (2 * TSTEP);
+    const hx = (hh(I, Math.min(J + 1, jb + 1)) - hh(I, Math.max(J - 1, ja - 1))) / (2 * TSTEP), hy = (hh(Math.min(I + 1, ib + 1), J) - hh(Math.max(I - 1, ia - 1), J)) / (2 * TSTEP);
     const L = Math.hypot(hx, hy, 1);
     g.nrm.push(-hx / L, 1 / L, hy / L);
-  }
-  // 隧道口附近山坡比隧道頂還低的地形方格挖掉 (不然會穿進隧道裡；洞口擋土牆會擋住這個缺口)
+    return g.v(J * TSTEP, I * TSTEP, (k === 1 ? Math.min(z, 0.4) - (z < 0.6 ? 3 : 1.8) : z) + zOff);   // 水底壓低，水面才看得到
+  };
+  for (const I of Is) for (const J of Js) vert(I, J);
+  yield;
+  // 隧道口附近山坡比隧道頂還低的方格挖掉 (只有最細的一級要做: 玩家才看得到隧道裡面)
   const inTunnel = (x, y, zt) => { const r = roadAt(x, y, zt + 12, -1.5, 0); return r && r.w.tunnel && zt < r.z + 8.6; };
-  for (let i = 0; i < ib - ia; i++) for (let j = 0; j < jb - ja; j++) {
-    const q = i * cols + j;
-    const I = ia + i, J = ja + j, xc = (J + 0.5) * TSTEP, yc = (I + 0.5) * TSTEP;
-    let near = false;   // 粗判: 方格中心與四角附近有沒有隧道 (空間索引以 40 m 格存，四角都查才不會漏)
-    for (const [px, py] of [[xc, yc], [J * TSTEP, I * TSTEP], [(J + 1) * TSTEP, I * TSTEP], [J * TSTEP, (I + 1) * TSTEP], [(J + 1) * TSTEP, (I + 1) * TSTEP]]) {
-      const r = roadAt(px, py, hh(I, J) + 40, -24, 0); if (r && r.w.tunnel) { near = true; break; }
-    }
-    if (near) {
-      let cut = false;   // 細判: 方格內 5x5 點 (7.5 m 間隔)，用雙線性內插的地形高度
-      for (let u = 0; u <= 4 && !cut; u++) for (let v = 0; v <= 4 && !cut; v++) {
-        const fu = u / 4, fv = v / 4;
-        const zt = (hh(I, J) * (1 - fu) + hh(I, J + 1) * fu) * (1 - fv) + (hh(I + 1, J) * (1 - fu) + hh(I + 1, J + 1) * fu) * fv;
-        cut = inTunnel((J + fu) * TSTEP, (I + fv) * TSTEP, zt);
+  for (let i = 0; i < rows - 1; i++) {
+    for (let j = 0; j < cols - 1; j++) {
+      const q = i * cols + j, I = Is[i], J = Js[j];
+      if (lod === 0) {
+        const xc = (J + 0.5) * TSTEP, yc = (I + 0.5) * TSTEP;
+        let near = false;
+        for (const [px, py] of [[xc, yc], [J * TSTEP, I * TSTEP], [(J + 1) * TSTEP, I * TSTEP], [J * TSTEP, (I + 1) * TSTEP], [(J + 1) * TSTEP, (I + 1) * TSTEP]]) {
+          const r = roadAt(px, py, hh(I, J) + 40, -24, 0); if (r && r.w.tunnel) { near = true; break; }
+        }
+        if (near) {
+          let cut = false;
+          for (let u = 0; u <= 4 && !cut; u++) for (let v = 0; v <= 4 && !cut; v++) {
+            const fu = u / 4, fv = v / 4;
+            const zt = (hh(I, J) * (1 - fu) + hh(I, J + 1) * fu) * (1 - fv) + (hh(I + 1, J) * (1 - fu) + hh(I + 1, J + 1) * fu) * fv;
+            cut = inTunnel((J + fu) * TSTEP, (I + fv) * TSTEP, zt);
+          }
+          if (cut) continue;
+        }
       }
-      if (cut) continue;
+      g.q(q, q + 1, q + cols + 1, q + cols);
     }
-    g.q(q, q + 1, q + cols + 1, q + cols);
+    if ((i & 15) === 15) yield;
+  }
+  // 裙邊: 四周邊緣往下 20 m (粗細不同的分區接在一起時不會看到縫)
+  if (lod > 0) {
+    const edge = (list) => {   // list: 邊上的格點 [I, J] (順時針)
+      let prevT = -1, prevB = -1;
+      for (const [I, J] of list) {
+        const t = vert(I, J), b = vert(I, J, -20);
+        if (prevT >= 0) g.q(prevT, prevB, b, t);   // 逆時針走一圈，面朝外
+        prevT = t; prevB = b;
+      }
+    };
+    edge(Js.map((J) => [ia, J])); edge(Is.map((I) => [I, jb])); edge(Js.slice().reverse().map((J) => [ib, J])); edge(Is.slice().reverse().map((I) => [I, ja]));
   }
   const m = g.mesh(matTerrain);
   m.geometry.setAttribute('aLc0', new T.Float32BufferAttribute(W0, 4));
   m.geometry.setAttribute('aLc1', new T.Float32BufferAttribute(W1, 4));
+  m.castShadow = false;
   if (!lc) return m;
+  yield;
   // 水面: 碰到水格的方格都畫；水格在原地形高度 (海 = 海平面)，旁邊陸地格壓到地面下 → 岸邊自然切出水線
-  const wg = new GB('uv'), idx = new Int32Array((ib - ia + 1) * cols).fill(-1);
+  const wg = new GB('uv'), idx = new Int32Array(rows * cols).fill(-1);
   const vid = (i, j) => {
     const q = i * cols + j;
     if (idx[q] < 0) {
-      const I = ia + i, J = ja + j, z = hh(I, J), water = lcAt(I, J) === 1, sea = z < 0.6;
+      const I = Is[i], J = Js[j], z = hh(I, J), water = lcAt(I, J) === 1, sea = z < 0.6;
       idx[q] = wg.v(J * TSTEP, I * TSTEP, water ? (sea ? 0.15 : z - 0.2) : z - 0.8);
       wg.uv.push(sea ? 1 : 0, 0);
     }
     return idx[q];
   };
-  for (let i = 0; i < ib - ia; i++) for (let j = 0; j < jb - ja; j++) {
-    const I = ia + i, J = ja + j;
-    if (lcAt(I, J) !== 1 && lcAt(I, J + 1) !== 1 && lcAt(I + 1, J + 1) !== 1 && lcAt(I + 1, J) !== 1) continue;
+  for (let i = 0; i < rows - 1; i++) for (let j = 0; j < cols - 1; j++) {
+    const I = Is[i], J = Js[j], I2 = Is[i + 1], J2 = Js[j + 1];
+    if (lcAt(I, J) !== 1 && lcAt(I, J2) !== 1 && lcAt(I2, J2) !== 1 && lcAt(I2, J) !== 1) continue;
     wg.q(vid(i, j), vid(i, j + 1), vid(i + 1, j + 1), vid(i + 1, j));
   }
   const grp = new T.Group(); grp.add(m);
@@ -2199,9 +2353,96 @@ function buildTerrainMesh(key, tx, ty) {
   grp.matrixAutoUpdate = false;
   return grp;
 }
-/** opts: x,y (預設車子位置)；all: 不限同時下載數；build: 'all' 全部建 / false 不建 / 預設每次 1 區 */
+function* terrainJob(key, tx, ty, r, lod) {
+  const gen = buildTerrain(key, tx, ty, lod);
+  let res;
+  for (;;) { const s = gen.next(); if (s.done) { res = s.value; break; } yield; }
+  if (r.mesh && r.mesh !== 'none') disposeObj(r.mesh);
+  r.mesh = res || 'none'; r.lod = lod; r.building = false; r.dirty = false;
+  if (res) { worldGroup.add(res); if (r.ortho && r.ortho.tex) orthoBind(r, tx, ty); }
+}
+
+// ---- 地面正射影像 (國土測繪中心 WMTS，政府資料開放授權，畫面下方標示來源)
+// 玩家附近的地形分區各拼一張貼圖；全部圖磚都抓到才換上 (離線、抓不到就維持原本的地表上色)
+// 解析度分兩級: 1.5 km 內用 z15 (≈ 4.3 m/像素)，再遠用 z14；手機各低一級。圖片在背景解碼 (createImageBitmap)，不卡畫面
+const ORTHO = { on: !params.has('noortho'), zNear: MOBILE ? 14 : 15, zFar: MOBILE ? 13 : 14, nearR: 1500, R: MOBILE ? 5000 : 8000, busy: 0, clock: 0 };
+const orthoUrl = (z, x, y) => `https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/${z}/${y}/${x}`;
+const terrPart = (m) => (m && m !== 'none') ? (m.isMesh ? m : m.children.find((o) => o.geometry && o.geometry.attributes.aLc0)) : null;
+const merc = (lat, lon, z) => { const n = 2 ** z; return [(lon + 180) / 360 * n, (1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * n]; };
+let ORTHO_MAT = null;   // 共用一個材質樣板 (著色器只編譯一次)；每塊複製一份換貼圖
+function orthoMaterial(tex) {
+  if (!ORTHO_MAT) ORTHO_MAT = patch(new T.MeshStandardMaterial({ roughness: 0.95, metalness: 0, map: new T.Texture() }), TERRAIN_SPEC);
+  const m = ORTHO_MAT.clone(); m.onBeforeCompile = ORTHO_MAT.onBeforeCompile; m.customProgramCacheKey = ORTHO_MAT.customProgramCacheKey; m.map = tex;
+  return m;
+}
+/** 貼圖座標: 分區四角的 Web Mercator 座標雙線性內插 (3.84 km 內誤差 < 1 m) */
+function orthoBind(r, tx, ty) {
+  const tm = terrPart(r.mesh); if (!tm || !r.ortho || !r.ortho.tex) return;
+  const { c, mx0, my0, cols, rows } = r.ortho;
+  const x0 = tx * TC * TSTEP, y0 = ty * TC * TSTEP, x1 = x0 + TC * TSTEP, y1 = y0 + TC * TSTEP;
+  const p = tm.geometry.attributes.position.array, uv = new Float32Array(p.length / 3 * 2);
+  for (let k = 0, q = 0; k < p.length; k += 3, q += 2) {
+    const fu = (p[k] - x0) / (x1 - x0), fv = (-p[k + 2] - y0) / (y1 - y0);
+    const mx = (c[0][0] * (1 - fu) + c[1][0] * fu) * (1 - fv) + (c[2][0] * (1 - fu) + c[3][0] * fu) * fv;
+    const my = (c[0][1] * (1 - fu) + c[1][1] * fu) * (1 - fv) + (c[2][1] * (1 - fu) + c[3][1] * fu) * fv;
+    uv[q] = (mx - mx0) / cols; uv[q + 1] = 1 - (my - my0) / rows;
+  }
+  tm.geometry.setAttribute('uv', new T.BufferAttribute(uv, 2));
+  tm.material = r.ortho.mat;
+}
+function orthoApply(r, tx, ty, z) {
+  const toLL = window.TWX && TWX.gpsSync && TWX.gpsSync.toLatLon;
+  if (!toLL || !r.mesh || r.mesh === 'none') return;
+  const prev = r.ortho;
+  r.ortho = { loading: true, z }; ORTHO.busy++;
+  const x0 = tx * TC * TSTEP, y0 = ty * TC * TSTEP, x1 = x0 + TC * TSTEP, y1 = y0 + TC * TSTEP;
+  const c = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].map(([x, y]) => merc(...toLL(x, y), z));
+  const mx0 = Math.floor(Math.min(...c.map((p) => p[0]))), mx1 = Math.floor(Math.max(...c.map((p) => p[0])));
+  const my0 = Math.floor(Math.min(...c.map((p) => p[1]))), my1 = Math.floor(Math.max(...c.map((p) => p[1])));
+  const cols = mx1 - mx0 + 1, rows = my1 - my0 + 1, jobs = [];
+  for (let yy = my0; yy <= my1; yy++) for (let xx = mx0; xx <= mx1; xx++)
+    jobs.push(fetch(orthoUrl(z, xx, yy)).then((res) => { if (!res.ok) throw new Error('HTTP ' + res.status); return res.blob(); }).then((b) => createImageBitmap(b)).then((im) => [im, xx - mx0, yy - my0]));
+  Promise.all(jobs).then((imgs) => {
+    ORTHO.busy--;
+    if (!TERR_REC.has(tkey(tx, ty)) || !r.ortho || r.ortho.z !== z) { for (const [im] of imgs) im.close(); return; }
+    const cv = document.createElement('canvas'); cv.width = cols * 256; cv.height = rows * 256;
+    const g2 = cv.getContext('2d');
+    for (const [im, i, j] of imgs) { g2.drawImage(im, i * 256, j * 256); im.close(); }
+    const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace; tex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+    const mat = orthoMaterial(tex);
+    if (prev && prev.tex) { prev.tex.dispose(); prev.mat.dispose(); }   // 換解析度: 新的換上後才丟舊的
+    r.ortho = { tex, mat, z, c, mx0, my0, cols, rows };
+    orthoBind(r, tx, ty);
+  }).catch((e) => {
+    ORTHO.busy--; r.ortho = prev && prev.tex ? prev : { fail: true };
+    if ((ORTHO.warned = (ORTHO.warned || 0) + 1) <= 3) console.warn('[ortho] 抓不到正射影像，維持原本地表', e && (e.message || e.type || e));
+  });
+}
+function orthoDrop(r) {
+  if (r.ortho && r.ortho.tex) { const tm = terrPart(r.mesh); if (tm) tm.material = matTerrain; r.ortho.tex.dispose(); r.ortho.mat.dispose(); }
+  r.ortho = null;
+}
+function orthoFrame(dt) {
+  if (!ORTHO.on || (ORTHO.clock -= dt) > 0) return;
+  ORTHO.clock = 0.4;
+  const P = S();
+  let pick = null, pd = 1e9;   // 一次處理一塊: 挑最近、需要換的
+  for (const [key, r] of TERR_REC) {
+    if (!r.mesh || r.mesh === 'none') continue;
+    const [tx, ty] = key.split('_').map(Number);
+    const d = tileDist(tx, ty, P.x, P.y);
+    if (d > ORTHO.R + 3000) { if (r.ortho && !r.ortho.loading) orthoDrop(r); continue; }
+    if (d >= ORTHO.R || (r.ortho && (r.ortho.loading || r.ortho.fail))) continue;
+    const want = d < ORTHO.nearR ? ORTHO.zNear : (r.ortho && r.ortho.z === ORTHO.zNear && d < ORTHO.nearR + 1500) ? ORTHO.zNear : ORTHO.zFar;   // 遲滯
+    if ((!r.ortho || r.ortho.z !== want) && d < pd) { pd = d; pick = [r, tx, ty, want]; }
+  }
+  if (!pick || ORTHO.busy >= 2) return;
+  orthoApply(...pick);
+}
+
+/** opts: x,y (預設車子位置)；all: 不限同時下載數；build: 'all' 全部建 / false 不建 / 預設排進工作佇列 */
 function streamTick(opts = {}) {
-  const x = opts.x != null ? opts.x : S.x, y = opts.y != null ? opts.y : S.y;
+  const P = S(), x = opts.x != null ? opts.x : P.x, y = opts.y != null ? opts.y : P.y;
   const proms = [];
   const near = tilesNear(x, y, DATA_R);
   for (const [key, tx, ty] of near) {
@@ -2213,146 +2454,36 @@ function streamTick(opts = {}) {
     if (inflight >= 8 && !opts.all) break;
     const pr = requestTerrain(key); if (pr) proms.push(pr);
   }
-  let budget = opts.build === 'all' ? 1e9 : opts.build === false ? 0 : 1;
-  for (const [key, , , d] of near) {
+  // 連接 (鄰區資料都到了): 伸縮縫、國道路肩。測試模式不建模型也要做 (AI、自動駕駛、碰撞都用得到)
+  for (const [key] of near) {
     const rec = TILES.get(key);
-    if (!rec || rec.state !== 'data') continue;
-    if (!rec.linked && neighborsReady(rec)) { rec.joints = computeJoints(rec); rec.linked = true; for (const k of rec.ways) setupShoulders(WAYS[k]); }
-    if (budget > 0 && rec.linked && !rec.group && d <= MESH_R) { buildTile(rec); budget--; }
+    if (rec && rec.state === 'data' && !rec.linked && neighborsReady(rec)) { for (const k of rec.ways) setupShoulders(WAYS[k]); rec.joints = computeJoints(rec); rec.linked = true; }   // 路肩先設定，伸縮縫才量得到加寬後的路緣
   }
-  let tb = opts.build === 'all' ? 1e9 : opts.build === false ? 0 : 3;
-  for (const [key, tx, ty] of nearT) {
-    const r = TERR_REC.get(key);
-    if (tb > 0 && r && r.state === 'data' && !r.mesh) {
-      const m = buildTerrainMesh(key, tx, ty);
-      r.mesh = m || 'none'; if (m) worldGroup.add(m);
-      tb--;
+  if (opts.build !== false) {
+    for (const [key, , , d] of near) {
+      const rec = TILES.get(key);
+      if (!rec || rec.state !== 'data') continue;
+      if (rec.linked && !rec.group && !rec.building && d <= MESH_R) { rec.building = true; addJob(buildTile(rec), d); }
     }
+    for (const [key, tx, ty, d] of nearT) {
+      const r = TERR_REC.get(key);
+      if (!r || r.state !== 'data' || r.building) continue;
+      const want = lodFor(d);
+      // 遲滯: 換級要超過門檻 300 m 才重建 (在邊界附近來回開不會一直重建)
+      const keep = r.lod >= 0 && Math.abs(want - r.lod) === 1 && lodFor(d + (want > r.lod ? -300 : 300)) === r.lod;
+      if (!r.mesh || r.dirty || (r.lod !== want && !keep)) { r.building = true; addJob(terrainJob(key, tx, ty, r, want), d + (r.mesh ? 2000 : 0)); }
+    }
+    if (opts.build === 'all') flushJobs();
   }
   // 丟掉遠處的模型
-  for (const rec of TILES.values()) if (rec.group && tileDist(rec.tx, rec.ty, x, y) > MESH_R + 1500) { disposeGroup(rec.group); rec.group = null; rec.bldChunks = []; }
+  for (const rec of TILES.values()) if (rec.group && tileDist(rec.tx, rec.ty, x, y) > MESH_R + 1500) { disposeObj(rec.group); rec.group = null; rec.chunks = []; }
   for (const [key, r] of TERR_REC) if (r.mesh && r.mesh !== 'none') {
     const [tx, ty] = key.split('_').map(Number);
-    if (tileDist(tx, ty, x, y) > TERR_R + 2500) { orthoDrop(r); disposeGroup(r.mesh); r.mesh = null; }
+    if (tileDist(tx, ty, x, y) > TERR_R + 2500) { orthoDrop(r); disposeObj(r.mesh); r.mesh = null; r.lod = -1; }
   }
   return proms;
 }
 /** 等 (x,y) 附近的資料到齊、模型建好 (起點與傳送用) */
-/** 穿模掃描 (?clipscan): 載入全部分區後檢查路口高低差、地形冒出路面、建築壓路、橋墩插路、立體交叉淨空 */
-async function clipScan() {
-  const proms = [];
-  for (const key of Object.keys(INDEX.detail)) { const [tx, ty] = key.split('_').map(Number); const p = requestDetail(key, tx, ty); if (p) proms.push(p); }
-  for (const key of Object.keys(INDEX.tiles_t)) { const p = requestTerrain(key); if (p) proms.push(p); }
-  await Promise.all(proms);
-  const t0 = performance.now();
-  const meshZ = (x, y) => {   // 與 buildTerrainMesh 相同的三角形
-    const J = x / TSTEP, I = y / TSTEP, j = Math.floor(J), i = Math.floor(I), u = J - j, v = I - i;
-    if (j < TGI.J0 || j >= TGI.J0 + TGI.w - 1 || i < TGI.I0 || i >= TGI.I0 + TGI.h - 1) return -1e9;   // 地形網格外不畫地形
-    const h = (ii, jj) => { const tx = Math.floor(jj / TC), ty = Math.floor(ii / TC), a = TERR.get(tkey(tx, ty)); return a ? Z16(a[(ii - ty * TC + 1) * TN + (jj - tx * TC + 1)]) : -1e9; };
-    const h00 = h(i, j), h10 = h(i, j + 1), h11 = h(i + 1, j + 1), h01 = h(i + 1, j);
-    return u >= v ? h00 + u * (h10 - h00) + v * (h11 - h10) : h00 + v * (h01 - h00) + u * (h11 - h01);
-  };
-  const nm = (w) => (w.city ? '' : '[' + (w.ref || 'fwy') + ']') + (w.name || '?') + '#' + w.gid;
-  const spots = (list, cell = 60) => { const m = new Map(); for (const s of list) { const k = Math.floor(s.x / cell) + ',' + Math.floor(s.y / cell); const o = m.get(k); if (!o || s.d > o.d) m.set(k, s); } return [...m.values()].sort((a, b) => b.d - a.d); };
-  const out = {};
-  // A. 路口高低差
-  const A = [];
-  for (const arr of PT_INDEX.values()) {
-    if (arr.length < 2) continue;
-    let lo = 1e9, hi = -1e9, wl = null, wh = null;
-    for (const [k, i] of arr) { const w = WAYS[k], z = w.P[i * 3 + 2]; if (z < lo) { lo = z; wl = w; } if (z > hi) { hi = z; wh = w; } }
-    if (hi - lo > 0.4 && wl !== wh) { const [k, i] = arr[0]; A.push({ x: WAYS[k].P[i * 3], y: WAYS[k].P[i * 3 + 1], d: hi - lo, a: nm(wl), b: nm(wh) }); }
-  }
-  out.junctionStep = A;
-  // B. 地形冒出路面 (隧道除外)
-  const B = [];
-  for (const w of WAYS) {
-    if (w.tunnel) continue;
-    const P = w.P, e = Math.max(0.3, w.hw - 0.3);
-    for (let i = 0; i < w.n - 1; i++) {
-      const ax = P[i * 3], ay = P[i * 3 + 1], az = P[i * 3 + 2], bx = P[i * 3 + 3], by = P[i * 3 + 4], bz = P[i * 3 + 5];
-      const L = Math.hypot(bx - ax, by - ay); if (L < 0.01) continue;
-      const nx = -(by - ay) / L, ny = (bx - ax) / L, steps = Math.max(1, Math.ceil(L / 5));
-      for (let s = 0; s <= steps; s++) {
-        const t = s / steps, x = ax + (bx - ax) * t, y = ay + (by - ay) * t, z = az + (bz - az) * t;
-        for (const o of [-e, 0, e]) { const d = meshZ(x + nx * o, y + ny * o) - z; if (d > 0.1) B.push({ x: x + nx * o, y: y + ny * o, d, a: nm(w), br: w.bridge }); }
-      }
-    }
-  }
-  out.terrainOverRoad = B;
-  const segNear = (x, y, fn) => { const a = GRID.get(cellKey(Math.floor(x / CELL), Math.floor(y / CELL))); if (!a) return; for (let q = 0; q < a.length; q += 2) fn(WAYS[a[q]], a[q + 1]); };
-  const onSeg = (w, i, x, y) => {
-    const P = w.P, ax = P[i * 3], ay = P[i * 3 + 1], dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L2 = dx * dx + dy * dy; if (L2 < 1e-4) return null;
-    const t = ((x - ax) * dx + (y - ay) * dy) / L2; if (t < 0 || t > 1) return null;
-    const lat = ((x - ax) * -dy + (y - ay) * dx) / Math.sqrt(L2);
-    return { z: P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t, lat };
-  };
-  // C. 建築壓在路上
-  const BG = new Map(), C = [];
-  for (const rec of TILES.values()) {
-    const b = rec.bld; if (!b) continue;
-    for (let k = 0, v = 0; k < b.nb; k++) {
-      const n = b.bcnt[k]; let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-      for (let q = 0; q < n; q++) { const x = b.bxy[(v + q) * 2], y = b.bxy[(v + q) * 2 + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
-      const ent = { b, v, n, base: b.bbase[k], h: b.bh[k] };
-      for (let cx = Math.floor(x0 / 50); cx <= Math.floor(x1 / 50); cx++) for (let cy = Math.floor(y0 / 50); cy <= Math.floor(y1 / 50); cy++) { const kk = cx + ',' + cy; let a = BG.get(kk); if (!a) BG.set(kk, a = []); a.push(ent); }
-      v += n;
-    }
-  }
-  const inPoly = (e, x, y) => { let c = false; const A2 = e.b.bxy; for (let i = 0, j = e.n - 1; i < e.n; j = i++) { const xi = A2[(e.v + i) * 2], yi = A2[(e.v + i) * 2 + 1], xj = A2[(e.v + j) * 2], yj = A2[(e.v + j) * 2 + 1]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
-  for (const w of WAYS) {
-    if (w.tunnel) continue;
-    const P = w.P, e = Math.max(0.3, w.hw - 0.5);
-    for (let i = 0; i < w.n - 1; i++) {
-      const ax = P[i * 3], ay = P[i * 3 + 1], az = P[i * 3 + 2], bx = P[i * 3 + 3], by = P[i * 3 + 4], bz = P[i * 3 + 5];
-      const L = Math.hypot(bx - ax, by - ay); if (L < 0.01) continue;
-      const nx = -(by - ay) / L, ny = (bx - ax) / L, steps = Math.max(1, Math.ceil(L / 4));
-      for (let s = 0; s <= steps; s++) {
-        const t = s / steps, z = az + (bz - az) * t;
-        for (const o of [-e, 0, e]) {
-          const x = ax + (bx - ax) * t + nx * o, y = ay + (by - ay) * t + ny * o;
-          for (const en of BG.get(Math.floor(x / 50) + ',' + Math.floor(y / 50)) || []) if (z > en.base - 1 && z < en.base + en.h - 0.5 && inPoly(en, x, y)) { C.push({ x, y, d: 1, a: nm(w), c: o === 0 }); break; }
-        }
-      }
-    }
-  }
-  out.buildingOnRoad = C;
-  // D. 橋墩插在路上
-  const D = [];
-  for (const rec of TILES.values()) {
-    const A3 = rec.piers;
-    for (let k = 0; k < A3.length / 9; k++) {
-      const [x, y, tx, ty, offL, zg, top] = A3.subarray(k * 9, k * 9 + 7);
-      const px = x - ty * offL, py = y + tx * offL;
-      segNear(px, py, (w, i) => { const r = onSeg(w, i, px, py); if (r && Math.abs(r.lat) < w.hw + 0.6 && r.z > zg + 0.3 && r.z < top - 1.6) D.push({ x: px, y: py, d: w.hw + 0.6 - Math.abs(r.lat), a: nm(w) }); });
-    }
-  }
-  out.pierOnRoad = D;
-  // E. 立體交叉淨空 (下層路面到上層路面 0.6 ~ 4.6 m)
-  const E = [];
-  for (const w of WAYS) {
-    const P = w.P;
-    for (let i = 0; i < w.n; i++) {
-      const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-      segNear(x, y, (o, j) => { if (o === w) return; const r = onSeg(o, j, x, y); if (!r || Math.abs(r.lat) > o.hw) return; const dz = r.z - z; if (dz > 0.6 && dz < 4.6 && !(o.city && w.city && dz < 1.2)) E.push({ x, y, d: 4.6 - dz, a: nm(w), b: nm(o) }); });
-    }
-  }
-  out.clearance = E;
-  const ms = performance.now() - t0;
-  console.log('[clipscan] ways', WAYS.length, 'tiles', TILES.size, 'ms', ms.toFixed(0));
-  for (const [k, list] of Object.entries(out)) {
-    const sp = spots(list);
-    console.log('[clipscan] ' + k + ' ' + JSON.stringify({ samples: list.length, spots: sp.length, top: sp.slice(0, 12).map((s) => [Math.round(s.x), Math.round(s.y), +s.d.toFixed(2), s.a, s.b || (s.br ? 'bridge' : '')]) }));
-  }
-  const hist = (list, edges, f = (q) => q.d) => edges.map((e, k) => list.filter((q) => f(q) >= e && (k === edges.length - 1 || f(q) < edges[k + 1])).length);
-  console.log('[clipscan] hist junction 0.4/1/3/6/20', JSON.stringify(hist(A, [0.4, 1, 3, 6])));
-  const Bf = B.filter((q) => !q.a.startsWith('[')), Bw = B.filter((q) => q.a.startsWith('['));
-  console.log('[clipscan] hist terrain city 0.1/0.3/1/3', JSON.stringify(hist(Bf, [0.1, 0.3, 1, 3])), 'spots', spots(Bf.filter((q) => q.d > 0.3)).length, 'fwy', JSON.stringify(hist(Bw, [0.1, 0.3, 1, 3])), 'spots', spots(Bw.filter((q) => q.d > 0.3)).length, 'bridge', B.filter((q) => q.br).length);
-  console.log('[clipscan] terrain fwy top ' + JSON.stringify(spots(Bw.filter((q) => q.d > 0.3)).slice(0, 10).map((s) => [Math.round(s.x), Math.round(s.y), +s.d.toFixed(2), s.a, s.br ? 'br' : ''])));
-  console.log('[clipscan] terrain city top ' + JSON.stringify(spots(Bf.filter((q) => q.d > 0.3)).slice(0, 10).map((s) => [Math.round(s.x), Math.round(s.y), +s.d.toFixed(2), s.a, s.br ? 'br' : ''])));
-  console.log('[clipscan] building center hits', C.filter((q) => q.c).length, 'spots', spots(C.filter((q) => q.c)).length);
-  window.CLIP = out;
-}
 async function ensureArea(x, y, msg) {
   for (let guard = 0; guard < 10; guard++) {
     const proms = streamTick({ x, y, all: true, build: false });
@@ -2362,72 +2493,59 @@ async function ensureArea(x, y, msg) {
   }
   streamTick({ x, y, build: 'all' });
 }
-let streamClock = 0;
-function streamFrame(dt) { streamClock -= dt; if (streamClock > 0) return; streamClock = 0.25; streamTick(); }
 
-// ---- 3D 建築: 依 OSM 高度 / 樓層擠出；牆面 UV (沿周長 m, 高度 m, 總高) 給窗戶材質用
-const FACADE = [[0.45, 0.40, 0.32], [0.42, 0.42, 0.40], [0.55, 0.54, 0.50], [0.28, 0.19, 0.13], [0.30, 0.30, 0.29], [0.48, 0.37, 0.33], [0.25, 0.29, 0.33]];
-// 建築依距離顯示 (手機 1.6 km、電腦 4.5 km)；遠處被霧氣蓋住，不畫可以省很多效能
-let bldClock = 0;
-function cullBuildings(dt) {
-  bldClock -= dt;
-  if (bldClock > 0) return;
-  bldClock = 0.5;
-  const R = (MOBILE ? 1600 : 4500) + 700;
-  for (const rec of TILES.values()) for (const ch of rec.bldChunks) { const vis = Math.hypot(ch.x - S.x, ch.y - S.y) < R; for (const m of ch.meshes) m.visible = vis; }
-}
-function buildBuildings(bld, world) {
-  const { bxy, bbase, bh, bcnt, bcol, nb } = bld;
-  const out = [];
-  const chunks = new Map(), CHB = 1000;
-  let o = 0;
-  for (let b = 0; b < nb; b++) {
-    const n = bcnt[b], base = bbase[b], top = base + bh[b], col = FACADE[bcol[b]];
-    let cx = 0, cy = 0;
-    for (let i = 0; i < n; i++) { cx += bxy[(o + i) * 2]; cy += bxy[(o + i) * 2 + 1]; }
-    cx /= n; cy /= n;
-    const key = Math.floor(cx / CHB) + ',' + Math.floor(cy / CHB);
-    let c = chunks.get(key);
-    if (!c) chunks.set(key, c = { wp: [], wuv: [], wcol: [], wi: [], rp: [], rcol: [], ri: [] });
-    let per = 0;
-    for (let i = 0; i < n; i++) {
-      const j = (i + 1) % n;
-      const ax = bxy[(o + i) * 2], ay = bxy[(o + i) * 2 + 1], bx = bxy[(o + j) * 2], by = bxy[(o + j) * 2 + 1];
-      const L = Math.hypot(bx - ax, by - ay);
-      const v0 = c.wp.length / 3;
-      c.wp.push(ax, base, -ay, bx, base, -by, bx, top, -by, ax, top, -ay);
-      c.wuv.push(per, 0, bh[b], per + L, 0, bh[b], per + L, bh[b], bh[b], per, bh[b], bh[b]);
-      for (let q = 0; q < 4; q++) c.wcol.push(col[0], col[1], col[2]);
-      c.wi.push(v0, v0 + 1, v0 + 2, v0, v0 + 2, v0 + 3);
-      per += L;
+// ---- 顯示距離與陰影 (每 0.3 秒): 依種類決定小塊顯示與否；只有玩家附近的小塊投射陰影
+let visClock = 0;
+function visFrame(dt) {
+  if ((visClock -= dt) > 0) return;
+  visClock = 0.3;
+  const P = S();
+  for (const rec of TILES.values()) for (const ch of rec.chunks) {
+    const d = Math.hypot(ch.x - P.x, ch.y - P.y) - ch.r;
+    if (ch.kind === 'bld') {
+      const vis = d < R_BLD;
+      for (const m of ch.meshes) { m.visible = vis; m.castShadow = vis && d < R_SHADOW; }
+      continue;
     }
-    const contour = [];
-    for (let i = 0; i < n; i++) contour.push(new T.Vector2(bxy[(o + i) * 2], bxy[(o + i) * 2 + 1]));
-    const tris = T.ShapeUtils.triangulateShape(contour.slice(), []);   // 會就地刪除重複端點，傳複本
-    const r0 = c.rp.length / 3;
-    for (let i = 0; i < n; i++) { c.rp.push(contour[i].x, top, -contour[i].y); c.rcol.push(col[0] * 0.6, col[1] * 0.6, col[2] * 0.6); }
-    for (const t of tris) c.ri.push(r0 + t[0], r0 + t[2], r0 + t[1]);
-    o += n;
+    for (let k = 0; k < ch.meshes.length; k++) {
+      const m = ch.meshes[k];
+      m.visible = d < KIND_R[ch.kinds[k]];
+      if (ch.casts[k]) m.castShadow = m.visible && d < R_SHADOW;
+      else if (m.isGroup) { const c = m.visible && d < R_SHADOW; m.traverse((q) => { if (q.isMesh) q.castShadow = c; }); }
+    }
   }
-  for (const c of chunks.values()) {
-    const g = new T.BufferGeometry();
-    g.setAttribute('position', new T.Float32BufferAttribute(c.wp, 3));
-    g.setAttribute('aUv3', new T.Float32BufferAttribute(c.wuv, 3));
-    g.setAttribute('aCol', new T.Float32BufferAttribute(c.wcol, 3));
-    g.setIndex(c.wp.length / 3 > 65535 ? new T.Uint32BufferAttribute(c.wi, 1) : new T.Uint16BufferAttribute(c.wi, 1));
-    g.computeVertexNormals(); g.computeBoundingSphere();
-    const m = new T.Mesh(g, matWall); m.castShadow = true; m.receiveShadow = true; m.matrixAutoUpdate = false; world.add(m);
-    const r = new T.BufferGeometry();
-    r.setAttribute('position', new T.Float32BufferAttribute(c.rp, 3));
-    r.setAttribute('aCol', new T.Float32BufferAttribute(c.rcol, 3));
-    r.setIndex(c.rp.length / 3 > 65535 ? new T.Uint32BufferAttribute(c.ri, 1) : new T.Uint16BufferAttribute(c.ri, 1));
-    r.computeVertexNormals(); r.computeBoundingSphere();
-    const rm = new T.Mesh(r, matRoof); rm.castShadow = true; rm.receiveShadow = true; rm.matrixAutoUpdate = false; world.add(rm);
-    out.push({ x: c.wp[0], y: -c.wp[2], meshes: [m, rm] });
-  }
-  return out;
+}
+let streamClock = 0;
+function streamFrame(dt) {
+  runJobs();
+  if ((streamClock -= dt) > 0) return;
+  streamClock = 0.25;
+  streamTick();
+}
+const cullBuildings = visFrame;   // 舊名稱 (drive.js 掛在 frame 上)
+
+// ---- 著色器預先編譯: 每種材質一個看不見的小網格，載入時一起編譯 (開車途中第一次看到才編譯會卡 0.2~1.4 秒)
+async function warmShaders(camera) {
+  const mats = new Set(Object.values(CATS).map((c) => c[1]()).concat([matWall, matRoof, matTerrain, matWater, matConcrete, matRail, matPortal, orthoMaterial(new T.Texture())]));
+  const grp = new T.Group(), geo = new T.BufferGeometry();
+  const N = 3, pos = new Float32Array(N * 3), z4 = new Float32Array(N * 4), z3 = new Float32Array(N * 3), z2 = new Float32Array(N * 2), z1 = new Float32Array(N);
+  geo.setAttribute('position', new T.BufferAttribute(pos, 3)); geo.setAttribute('normal', new T.BufferAttribute(z3.slice(), 3));
+  for (const [k, a, s] of [['aUv', z2, 2], ['uv', z2, 2], ['aLs', z1, 1], ['aLanes', z1, 1], ['aLc0', z4, 4], ['aLc1', z4, 4], ['aUv3', z3, 3], ['aCol', z3, 3]]) geo.setAttribute(k, new T.BufferAttribute(a.slice(), s));
+  for (const m of mats) for (const cast of [false, true]) { const me = new T.Mesh(geo, m); me.castShadow = cast; me.receiveShadow = true; me.frustumCulled = false; grp.add(me); }
+  const pts = new T.Points(geo, GLOW_LAMP); pts.frustumCulled = false; grp.add(pts);
+  scene.add(grp);
+  try { await renderer.compileAsync(scene, camera); } catch (e) { renderer.compile(scene, camera); }
+  scene.remove(grp);
 }
 
+Object.assign(TW, { TILES, TERR_REC, tilesNear, tileDist, streamTick, streamFrame, ensureArea, orthoFrame, cullBuildings, visFrame, crossedJoint,
+  warmShaders, runJobs, flushJobs, worldGroup, box, GB });
+})();
+
+/* 台灣 1:1 — 玩家精細車輛模型 (車牌、方向燈、車身 loft) */
+(function () {
+'use strict';
+const { T } = TW;
 // ======================================================================= 精細車輛
 function plateTexture(text) {
   const cv = document.createElement('canvas'); cv.width = 380; cv.height = 160;
@@ -2620,6 +2738,17 @@ function buildCar() {
   return car;
 }
 
+Object.assign(TW, { SIG_ON, SIG_OFF, blinkPhase, buildCar });
+})();
+
+/* 台灣 1:1 — 駕駛: 玩家車輛狀態與物理、自動駕駛、攝影機、儀表、小地圖、主迴圈 */
+(function () {
+'use strict';
+const { T, $, params, setStatus, HOOKS, INDEX, TS, tileBuf, LANE_W, WAYS, wayByGid, ptKey, PT_INDEX, roadAt, terrainAt, landcoverAt,
+  laneCount, laneOffDir, nextOptions, chooseNext, deadEndAhead, nextWay, speedLimit, leftPost, rightEdge, BAR_HALF,
+  renderer, MOBILE, scene, camera, SUN_DIR, NIGHT, WEATHER, sun, smooth01, updateDayNight, cycleTime, GLOW_TEX, WATER_T,
+  TILES, tilesNear, streamTick, streamFrame, ensureArea, orthoFrame, cullBuildings, crossedJoint, warmShaders,
+  SIG_ON, SIG_OFF, blinkPhase, buildCar } = TW;
 // ======================================================================= 車輛狀態與物理
 const PLAYER_TYPES = ['sedan', 'taxi', 'police', 'scooter', 'minibus', 'citybus', 'coach', 'boxtruck', 'bigtruck', 'semi'];
 const PLAYER_PAINT = { taxi: [0.8, 0.52, 0.02], police: [0.85, 0.85, 0.83], citybus: [0.8, 0.8, 0.78], coach: [0.8, 0.8, 0.78], minibus: [0.8, 0.8, 0.78] };
@@ -2655,81 +2784,6 @@ function setVehicle(type) {
   camInit = false;
 }
 
-// ---- 車道 / 路網 (國道、快速道路、一般道路共用)
-/** 行進方向的車道數 (雙向一般道路只算一半) */
-const laneCount = (w) => (w.city && !w.oneway) ? Math.max(1, Math.floor(w.lanes / 2)) : w.lanes;
-/** 車道中心相對路線左法向的偏移。lane 0 = 最內側；雙向一般道路靠行進方向右側 */
-function laneOffDir(w, lane, dir = 1) {
-  const lc = laneCount(w);
-  lane = Math.min(Math.max(lane, 0), lc - 1);
-  if (w.city) {
-    if (!w.oneway) { const off = (lane + 0.5) * (w.width / 2 - 0.3) / lc; return dir > 0 ? -off : off; }
-    return (w.width / 2 - 0.3) - (lane + 0.5) * (w.width - 0.6) / w.lanes;
-  }
-  if (w.link && w.lanes === 1) return 0;
-  return w.hw - w.ls - LANE_W * (lane + 0.5);
-}
-/** 速限: OSM maxspeed，沒有就依道路等級 */
-const speedLimit = (w) => w.maxspeed || (w.city ? (w.cls === 5 ? 30 : 50) : w.trunk ? (w.link ? 50 : 80) : (w.link ? 60 : 100));
-/** 路口 (路段端點 node) 可以接續的路段與方向；雙向一般道路兩個方向都能走 */
-function nodeLinks(w, node) {
-  const x = w.P[node * 3], y = w.P[node * 3 + 1];
-  const own = PT_INDEX.get(ptKey(x, y)) || [];
-  // 一般道路的點是「各路段自己的起點 + 0.1 m 整數位移」存的，同一個路口在不同路段上會差幾公分，四捨五入常落到隔壁格子:
-  // 載入範圍內約 29% 的端點因此接不到任何路、另外 20% 少接幾條。隔壁格子 20 公分內的點也算進來 (兩邊至少一條是一般道路；國道之間的點完全一致)
-  const gx = Math.round(x * 10), gy = Math.round(y * 10);
-  let res = own;
-  for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
-    if (!ox && !oy) continue;
-    for (const e of PT_INDEX.get((gx + ox) + ',' + (gy + oy)) || []) {
-      const o = WAYS[e[0]];
-      if (e[0] !== w.k && (o.city || w.city) && Math.hypot(o.P[e[1] * 3] - x, o.P[e[1] * 3 + 1] - y) < 0.2 && !res.some(([k, i]) => k === e[0] && i === e[1])) {
-        if (res === own) res = own.slice();
-        res.push(e);
-      }
-    }
-  }
-  return res;
-}
-function nextOptions(w, node) {
-  const res = [];
-  for (const [k, i] of nodeLinks(w, node)) {
-    if (k === w.k) continue;
-    const o = WAYS[k];
-    if (Math.abs(o.P[i * 3 + 2] - w.P[node * 3 + 2]) > 2.5) continue;   // 不同樓層剛好重疊，不相連
-    if (i < o.n - 1) res.push({ o, i, dir: 1, hx: o.ny[i], hy: -o.nx[i] });
-    if (o.city && !o.oneway && i > 0) res.push({ o, i, dir: -1, hx: -o.ny[i], hy: o.nx[i] });
-  }
-  return res.sort((a, b) => a.o.gid - b.o.gid);   // 依全域編號排序: 選路結果不受分區載入順序影響
-}
-/** 接續選項 o (nextOptions 的一項) 走到底以後還有沒有路: 一般道路才看 (林口文化一路、羅東巷子裡只有 2 個點的死路，
- *  以前自動駕駛和 AI 都會直接開進去卡住)。只往前看一層，走不出去就算死路 */
-function deadEndAhead(o) {
-  if (!o.o.city) return false;
-  return nextOptions(o.o, o.dir > 0 ? o.o.n - 1 : 0).length === 0;
-}
-/** 玩家自動駕駛選路: 國道優先同一條主線；一般道路直行，打方向燈就在路口轉彎 */
-function chooseNext(w, node, dir, signal) {
-  const hx = dir > 0 ? w.ny[node] : -w.ny[node], hy = dir > 0 ? -w.nx[node] : w.nx[node];
-  let best = null, bs = -1e9;
-  for (const o of nextOptions(w, node)) {
-    const dot = hx * o.hx + hy * o.hy, cross = hx * o.hy - hy * o.hx;
-    if (dot < (w.city || o.o.city ? -0.2 : 0.3)) continue;
-    let sc = dot * 2 + (o.o.ref && o.o.ref === w.ref ? 3 : 0) + (o.o.link && !w.link ? -2 : 0) + (w.link && !o.o.link ? 2 : 0)
-      + (!!o.o.city !== !!w.city ? -1 : 0) + (o.o.city && o.o.cls === 5 ? -1 : 0);
-    if (deadEndAhead(o)) sc -= 6;   // 下一段的盡頭沒有路接 (死巷、資料斷掉): 除非沒別條，不要鑽進去
-    if (HOOKS.navBias) sc += HOOKS.navBias(w, o);   // 導航路線上的下一段
-    if (signal < 0 && cross > 0.3) sc += 6;
-    if (signal > 0 && cross < -0.3) sc += 6;
-    if (sc > bs) { bs = sc; best = o; }
-  }
-  if (!best && w.city) {   // 市區只剩急轉出得去 (單行道尾端接 V 字路口): 挑最順的那條，不要停在路尾
-    let bd = -1e9;
-    for (const o of nextOptions(w, node)) if (o.o.city) { const dot = hx * o.hx + hy * o.hy; if (dot > bd) { bd = dot; best = o; } }
-  }
-  return best;
-}
-const nextWay = (w) => { const o = chooseNext(w, w.n - 1, 1, 0); return o ? [o.o, o.i] : null; };
 
 function spawn(wayIdx, idx, dir = 1, lane = null) {
   const w = WAYS[wayIdx];
@@ -3434,12 +3488,13 @@ window.addEventListener('resize', () => {
 });
 
 // ---- 給擴充模組 (features.js: 車流、電台、看板) 用的介面
-const HOOKS = { init: [], update: [], frame: [], minimap: [], tile: [], key: [], wayColor: null, navBias: null };
-window.TW = { T, scene, camera, renderer, NIGHT, GLOW_TEX, landcoverAt, WAYS, wayByGid, TILES, TS, tilesNear, PT_INDEX, ptKey, S, LANE_W, roadAt, terrainAt, nextWay, buildCar, HOOKS, params,
-  laneCount, laneOffDir, leftPost, rightEdge, nextOptions, deadEndAhead, speedLimit, setVehicle, spawn, ORIGIN: INDEX.origin_twd97, MOBILE, WEATHER, keys, tileBuf, roadLabel, toast, toggleMenu,
-  toggleManual, shift, toggleCruise, ensureArea, respawnNearest, SPAWNS: () => SPAWNS, sun,
-  get camMode() { return camMode; }, get autopilot() { return autopilot; }, set autopilot(v) { autopilot = !!v; },
-  get mapScale() { return MAP_SCALES[mapScaleIdx]; }, MAP_PX: 200 };
+Object.assign(TW, { S, setVehicle, spawn, ORIGIN: INDEX.origin_twd97, keys, roadLabel, toast, toggleMenu,
+  toggleManual, shift, toggleCruise, respawnNearest, SPAWNS: () => SPAWNS, MAP_PX: 200 });
+Object.defineProperties(TW, {
+  camMode: { get() { return camMode; }, configurable: true },
+  autopilot: { get() { return autopilot; }, set(v) { autopilot = !!v; }, configurable: true },
+  mapScale: { get() { return MAP_SCALES[mapScaleIdx]; }, configurable: true },
+});
 
 setStatus('載入地圖分區…');
 setTimeout(async () => {
@@ -3484,7 +3539,6 @@ setTimeout(async () => {
   window.addEventListener('pagehide', savePos);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') savePos(); });
   for (const f of HOOKS.init) f();
-  if (params.has('clipscan')) await clipScan();
   if (params.has('t')) { // 測試用: 先跑幾秒
     const LCT = params.has('lctest');   // 車道置中測試: 手動只踩油門，每 20 秒打一下方向盤
     autopilot = !LCT; S.v = 25;
@@ -3526,18 +3580,32 @@ setTimeout(async () => {
   }
   if (params.has('t')) await ensureArea(S.x, S.y);
   syncCar(0); updateCamera(1); updateDayNight(0);
+  if (!params.has('t')) { setStatus('準備畫面…'); await warmShaders(camera); }   // 著色器先編譯好，開車途中不會卡
   $('loading').classList.add('hidden');
   let last = performance.now(), frame = 0;
+  // ?hitch: 每 10 秒印出每幀各部分的平均 / 最長時間 (找卡頓用)
+  const HP = params.has('hitch') ? { acc: {}, t0: performance.now(), frames: 0, long: 0, worst: 0 } : null;
+  const hp = (name, f) => { if (!HP) return f(); const t = performance.now(); f(); const d = performance.now() - t; const a = HP.acc[name] || (HP.acc[name] = { s: 0, m: 0 }); a.s += d; if (d > a.m) a.m = d; };
   function loop(now) {
-    const dt = Math.min((now - last) / 1000, params.has("realtime") ? 1.0 : 0.05); last = now;   // realtime: 背景展示用，依真實時間推進
+    const fs = performance.now();
+    const dt = Math.min((now - last) / 1000, params.has('realtime') ? 1.0 : 0.05); last = now;   // realtime: 背景展示用，依真實時間推進
     const sub = Math.max(1, Math.ceil(dt / (1 / 120)));
-    for (let i = 0; i < sub; i++) update(dt / sub);
-    for (const f of HOOKS.update) f(dt);
-    syncCar(dt); updateCamera(dt); updateDayNight(dt); WATER_T.value = now / 1000;
-    for (const f of HOOKS.frame) f(dt);
-    renderer.render(scene, camera);
-    if ((frame++ & 1) === 0) drawMinimap();
-    updateHud();
+    hp('physics', () => { for (let i = 0; i < sub; i++) update(dt / sub); });
+    HOOKS.update.forEach((f, i) => hp('upd' + i, () => f(dt)));
+    hp('car+cam', () => { syncCar(dt); updateCamera(dt); updateDayNight(dt); WATER_T.value = now / 1000; });
+    HOOKS.frame.forEach((f, i) => hp('frm' + i, () => f(dt)));
+    hp('render', () => renderer.render(scene, camera));
+    hp('minimap', () => { if ((frame++ & 1) === 0) drawMinimap(); });
+    hp('hud', () => updateHud());
+    if (HP) {
+      const d = performance.now() - fs; HP.frames++; if (d > 50) HP.long++; if (d > HP.worst) HP.worst = d;
+      if (performance.now() - HP.t0 > 10000) {
+        const el = performance.now() - HP.t0;
+        console.log('[hitch] fps', (HP.frames / el * 1000).toFixed(1), 'long>50ms', HP.long, 'worst', HP.worst.toFixed(0), 'calls', renderer.info.render.calls, 'tris', (renderer.info.render.triangles / 1e3).toFixed(0) + 'k',
+          Object.entries(HP.acc).sort((a, b) => b[1].s - a[1].s).map(([k, v]) => k + ' ' + (v.s / HP.frames).toFixed(2) + '/' + v.m.toFixed(0)).join(' | '));
+        HP.acc = {}; HP.t0 = performance.now(); HP.frames = 0; HP.long = 0; HP.worst = 0;
+      }
+    }
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
@@ -5404,15 +5472,19 @@ const trees = (() => {
     crownGeo.computeVertexNormals();
   }
   const trunkGeo = new T.CylinderGeometry(0.12, 0.2, 1, 6);
-  const crown = new T.InstancedMesh(crownGeo, new T.MeshStandardMaterial({ roughness: 0.9, metalness: 0, flatShading: true }), CAP);
-  const trunk = new T.InstancedMesh(trunkGeo, new T.MeshStandardMaterial({ color: 0x3b2a1c, roughness: 0.95 }), CAP);
-  for (const m of [crown, trunk]) { m.castShadow = true; m.receiveShadow = true; m.count = 0; m.frustumCulled = false; TW.scene.add(m); }
+  // 近 (220 m 內，投射陰影) / 遠 (不投射、樹冠面數少) 兩組: 陰影那一輪只畫近的 (以前 7000 棵全畫，約 60 萬三角形)
+  const NEAR_R = 220, crownFar = new T.IcosahedronGeometry(1, 0);
+  { const p = crownFar.getAttribute('position'); for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) * 0.8); crownFar.computeVertexNormals(); }
+  const crownMat = new T.MeshStandardMaterial({ roughness: 0.9, metalness: 0, flatShading: true }), trunkMat = new T.MeshStandardMaterial({ color: 0x3b2a1c, roughness: 0.95 });
+  const crown = new T.InstancedMesh(crownGeo, crownMat, CAP), trunk = new T.InstancedMesh(trunkGeo, trunkMat, CAP);
+  const crownF = new T.InstancedMesh(crownFar, crownMat, CAP), trunkF = new T.InstancedMesh(trunkGeo, trunkMat, CAP);
+  for (const m of [crown, trunk, crownF, trunkF]) { m.castShadow = m === crown || m === trunk; m.receiveShadow = true; m.count = 0; m.frustumCulled = false; TW.scene.add(m); }
   const M4 = new T.Matrix4(), Q = new T.Quaternion(), V = new T.Vector3(), SC = new T.Vector3(), COL = new T.Color(), UP = new T.Vector3(0, 1, 0);
   const hash = (i, j, k) => { let h = (i * 374761393 + j * 668265263 + k * 2147483647) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
   let cx = 1e9, cy = 1e9;
   function rebuild() {
     cx = S.x; cy = S.y;
-    let n = 0;
+    let n = 0, nn = 0, nf = 0;
     const i0 = Math.floor((cx - R) / STEP), i1 = Math.floor((cx + R) / STEP), j0 = Math.floor((cy - R) / STEP), j1 = Math.floor((cy + R) / STEP);
     for (let i = i0; i <= i1 && n < CAP; i++) for (let j = j0; j <= j1 && n < CAP; j++) {
       const x = (i + hash(i, j, 1)) * STEP, y = (j + hash(i, j, 2)) * STEP;
@@ -5429,15 +5501,15 @@ const trees = (() => {
       if (TW.roadAt(x, y, z + 30, -8, 0)) continue;     // 道路附近、高架下方不種
       const h = 6 + hash(i, j, 4) * 9, w = h * (0.32 + hash(i, j, 5) * 0.14);
       Q.setFromAxisAngle(UP, hash(i, j, 6) * 6.28);
-      M4.compose(V.set(x, z + h * 0.62, -y), Q, SC.set(w, h * 0.42, w)); crown.setMatrixAt(n, M4);
-      M4.compose(V.set(x, z + h * 0.2 - 0.3, -y), Q, SC.set(1, h * 0.45, 1)); trunk.setMatrixAt(n, M4);
+      const near = (x - cx) ** 2 + (y - cy) ** 2 < NEAR_R * NEAR_R, C = near ? crown : crownF, Tr = near ? trunk : trunkF, q = near ? nn++ : nf++;
+      M4.compose(V.set(x, z + h * 0.62, -y), Q, SC.set(w, h * 0.42, w)); C.setMatrixAt(q, M4);
+      M4.compose(V.set(x, z + h * 0.2 - 0.3, -y), Q, SC.set(1, h * 0.45, 1)); Tr.setMatrixAt(q, M4);
       const g = hash(i, j, 7);
-      crown.setColorAt(n, COL.setRGB(0.03 + g * 0.04, 0.07 + g * 0.06, 0.025 + g * 0.02));
+      C.setColorAt(q, COL.setRGB(0.03 + g * 0.04, 0.07 + g * 0.06, 0.025 + g * 0.02));
       n++;
     }
-    crown.count = trunk.count = n;
-    crown.instanceMatrix.needsUpdate = trunk.instanceMatrix.needsUpdate = true;
-    if (crown.instanceColor) crown.instanceColor.needsUpdate = true;
+    crown.count = trunk.count = nn; crownF.count = trunkF.count = nf;
+    for (const m of [crown, trunk, crownF, trunkF]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
   }
   let clock = 0, since = 0, early = 0, dirtyT = 0;
   return {
@@ -5449,7 +5521,7 @@ const trees = (() => {
       if (Math.hypot(S.x - cx, S.y - cy) > 150) { early = 0; since = 0; rebuild(); }
       else if (early < 6 && since > 3) { early++; since = 0; rebuild(); }
     },
-    get count() { return crown.count; },
+    get count() { return crown.count + crownF.count; },
     dirty() { dirtyT = 1.0; },
   };
 })();

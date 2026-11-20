@@ -41,7 +41,8 @@ def main():
     index = open(os.path.join(tiles, "index.json"), encoding="utf-8").read().replace("</", "<\/")
     parts = {
         "THREE_JS": safe(three_classic(), "three.js"),
-        "APP_JS": safe(open(os.path.join(WEB, "app.js"), encoding="utf-8").read(), "app.js"),
+        # 主程式拆成幾個模組，依序載入 (每個都是獨立的 IIFE，透過 window.TW 互通)
+        "APP_JS": chr(10).join(safe(open(os.path.join(WEB, f), encoding="utf-8").read(), f) for f in ("core.js", "render.js", "world.js", "car.js", "drive.js")),
         "TILE_INDEX": index,
         "VEHICLES_JS": safe(open(os.path.join(WEB, "vehicles.js"), encoding="utf-8").read(), "vehicles.js"),
         "HLS_JS": safe(open(os.path.join(WEB, "vendor", "hls.light.min.js"), encoding="utf-8").read(), "hls.js"),

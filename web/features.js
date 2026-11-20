@@ -1858,15 +1858,19 @@ const trees = (() => {
     crownGeo.computeVertexNormals();
   }
   const trunkGeo = new T.CylinderGeometry(0.12, 0.2, 1, 6);
-  const crown = new T.InstancedMesh(crownGeo, new T.MeshStandardMaterial({ roughness: 0.9, metalness: 0, flatShading: true }), CAP);
-  const trunk = new T.InstancedMesh(trunkGeo, new T.MeshStandardMaterial({ color: 0x3b2a1c, roughness: 0.95 }), CAP);
-  for (const m of [crown, trunk]) { m.castShadow = true; m.receiveShadow = true; m.count = 0; m.frustumCulled = false; TW.scene.add(m); }
+  // 近 (220 m 內，投射陰影) / 遠 (不投射、樹冠面數少) 兩組: 陰影那一輪只畫近的 (以前 7000 棵全畫，約 60 萬三角形)
+  const NEAR_R = 220, crownFar = new T.IcosahedronGeometry(1, 0);
+  { const p = crownFar.getAttribute('position'); for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) * 0.8); crownFar.computeVertexNormals(); }
+  const crownMat = new T.MeshStandardMaterial({ roughness: 0.9, metalness: 0, flatShading: true }), trunkMat = new T.MeshStandardMaterial({ color: 0x3b2a1c, roughness: 0.95 });
+  const crown = new T.InstancedMesh(crownGeo, crownMat, CAP), trunk = new T.InstancedMesh(trunkGeo, trunkMat, CAP);
+  const crownF = new T.InstancedMesh(crownFar, crownMat, CAP), trunkF = new T.InstancedMesh(trunkGeo, trunkMat, CAP);
+  for (const m of [crown, trunk, crownF, trunkF]) { m.castShadow = m === crown || m === trunk; m.receiveShadow = true; m.count = 0; m.frustumCulled = false; TW.scene.add(m); }
   const M4 = new T.Matrix4(), Q = new T.Quaternion(), V = new T.Vector3(), SC = new T.Vector3(), COL = new T.Color(), UP = new T.Vector3(0, 1, 0);
   const hash = (i, j, k) => { let h = (i * 374761393 + j * 668265263 + k * 2147483647) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
   let cx = 1e9, cy = 1e9;
   function rebuild() {
     cx = S.x; cy = S.y;
-    let n = 0;
+    let n = 0, nn = 0, nf = 0;
     const i0 = Math.floor((cx - R) / STEP), i1 = Math.floor((cx + R) / STEP), j0 = Math.floor((cy - R) / STEP), j1 = Math.floor((cy + R) / STEP);
     for (let i = i0; i <= i1 && n < CAP; i++) for (let j = j0; j <= j1 && n < CAP; j++) {
       const x = (i + hash(i, j, 1)) * STEP, y = (j + hash(i, j, 2)) * STEP;
@@ -1883,15 +1887,15 @@ const trees = (() => {
       if (TW.roadAt(x, y, z + 30, -8, 0)) continue;     // 道路附近、高架下方不種
       const h = 6 + hash(i, j, 4) * 9, w = h * (0.32 + hash(i, j, 5) * 0.14);
       Q.setFromAxisAngle(UP, hash(i, j, 6) * 6.28);
-      M4.compose(V.set(x, z + h * 0.62, -y), Q, SC.set(w, h * 0.42, w)); crown.setMatrixAt(n, M4);
-      M4.compose(V.set(x, z + h * 0.2 - 0.3, -y), Q, SC.set(1, h * 0.45, 1)); trunk.setMatrixAt(n, M4);
+      const near = (x - cx) ** 2 + (y - cy) ** 2 < NEAR_R * NEAR_R, C = near ? crown : crownF, Tr = near ? trunk : trunkF, q = near ? nn++ : nf++;
+      M4.compose(V.set(x, z + h * 0.62, -y), Q, SC.set(w, h * 0.42, w)); C.setMatrixAt(q, M4);
+      M4.compose(V.set(x, z + h * 0.2 - 0.3, -y), Q, SC.set(1, h * 0.45, 1)); Tr.setMatrixAt(q, M4);
       const g = hash(i, j, 7);
-      crown.setColorAt(n, COL.setRGB(0.03 + g * 0.04, 0.07 + g * 0.06, 0.025 + g * 0.02));
+      C.setColorAt(q, COL.setRGB(0.03 + g * 0.04, 0.07 + g * 0.06, 0.025 + g * 0.02));
       n++;
     }
-    crown.count = trunk.count = n;
-    crown.instanceMatrix.needsUpdate = trunk.instanceMatrix.needsUpdate = true;
-    if (crown.instanceColor) crown.instanceColor.needsUpdate = true;
+    crown.count = trunk.count = nn; crownF.count = trunkF.count = nf;
+    for (const m of [crown, trunk, crownF, trunkF]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
   }
   let clock = 0, since = 0, early = 0, dirtyT = 0;
   return {
@@ -1903,7 +1907,7 @@ const trees = (() => {
       if (Math.hypot(S.x - cx, S.y - cy) > 150) { early = 0; since = 0; rebuild(); }
       else if (early < 6 && since > 3) { early++; since = 0; rebuild(); }
     },
-    get count() { return crown.count; },
+    get count() { return crown.count + crownF.count; },
     dirty() { dirtyT = 1.0; },
   };
 })();
