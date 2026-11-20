@@ -78,7 +78,7 @@ def main():
         tx, ty = (int(v) for v in k.split("_"))
         return (tx + 0.5) ** 2 + (ty + 0.5) ** 2
     inline, total, skipped = [], 0, 0
-    for k in sorted(keys, key=dist):
+    for k in sorted(keys, key=lambda k: (dist(k), k)):   # 同距離用名稱排 (每次打包順序一樣，diff 乾淨)
         blobs = []
         for kind in ("t", "d"):
             p = os.path.join(tiles, kind, k + ".bin")

@@ -502,7 +502,7 @@ const matAsphalt = patch(new T.MeshStandardMaterial({ roughness: 0.85, metalness
   uniforms: ASPH_U, normal: ASPH_NORMAL, rough: ASPH_ROUGH,
   emis: `totalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.58, 0.26) * (0.5 + 0.12 * sin(vRUv.y * 2.094)) * gTun;   // 隧道燈 (暖橘)
   if (uNight > 0.01 && gTun < 0.5) {   // 夜晚: 中央分隔島路燈照在路面 (每 40 m 一盞)
-    float ds = (fract((vRUv.y - 2.0) / 40.0 + 0.5) - 0.5) * 40.0, du = vRUv.x - 1.0;
+    float ds = (fract((vRUv.y - 2.0) / 40.0 + 0.5) - 0.5) * 40.0, du = vRUv.x + 0.8;   // 路燈在中央護欄上 (路面左緣外約 0.8 m)
     float L = exp(-(ds * ds * 0.5 + du * du * 0.7) / 90.0) + 0.01;   // 燈下一圈光，燈與燈之間是暗的
     totalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.3, 0.035) * L * 1.5 * uNight;   // 高壓鈉燈橘光
   }`,
@@ -949,14 +949,80 @@ function roadside(c, w, o, inward) {
     box(c.bpole, bx, by, ux, uy, hwB, 0.08, bot - 0.6, bot - 0.45);           // 下方維修走道
   }
 }
+/** 國道主線每個點到左側對向路面邊緣的間距 (m)；沒有緊鄰的對向路面為 null。另回傳對向路段 (決定誰建共用護欄) */
+function medianGaps(w, orig) {
+  const { P, nx, ny, n } = w, hw = orig ? (w.hw0 ?? w.hw) : w.hw, gap = new Array(n).fill(null), opp = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], tx = ny[i], ty = -nx[i];
+    let best = 1e9, bo = null;
+    for (const off of [1.5, 4.5]) {
+      const a = GRID.get(cellKey(Math.floor((x + nx[i] * (hw + off)) / CELL), Math.floor((y + ny[i] * (hw + off)) / CELL)));
+      if (!a) continue;
+      for (let j = 0; j < a.length; j += 2) {
+        const o = WAYS[a[j]], si = a[j + 1];
+        if (!o || o === w || o.city || o.link || !o.oneway || o.tunnel) continue;
+        const ax = o.P[si * 3], ay = o.P[si * 3 + 1], bx = o.P[si * 3 + 3], by = o.P[si * 3 + 4], L = Math.hypot(bx - ax, by - ay) || 1;
+        const ux = (bx - ax) / L, uy = (by - ay) / L;
+        if (ux * tx + uy * ty > -0.85 || Math.abs(o.P[si * 3 + 2] - z) > 2) continue;   // 要反方向、同高度
+        const t = Math.min(L, Math.max(0, (x - ax) * ux + (y - ay) * uy)), cx = ax + ux * t, cy = ay + uy * t;
+        if ((cx - x) * nx[i] + (cy - y) * ny[i] <= 0) continue;   // 要在左邊
+        const g = Math.hypot(cx - x, cy - y) - hw - (orig ? (o.hw0 ?? o.hw) : o.hw);
+        if (g > -2 && g < 6 && g < best) { best = g; bo = o; }
+      }
+    }
+    if (bo) { gap[i] = best; opp[i] = bo; }
+  }
+  // 平滑 (前後 3 點)，零星沒配對的點補起來
+  const sm = gap.map((g, i) => { let sum = 0, k = 0; for (let j = Math.max(0, i - 3); j <= Math.min(n - 1, i + 3); j++) if (gap[j] != null) { sum += gap[j]; k++; } return k >= 3 ? sum / k : null; });
+  for (let i = 0; i < n; i++) if (sm[i] != null && !opp[i]) { for (let j = 1; j < 4; j++) { const o = opp[i - j] || opp[i + j]; if (o) { opp[i] = o; break; } } }
+  return { gap: sm, opp };
+}
+// 內側路肩: 黃線到中央護欄面 2 m；外側路肩: 最外側白線到外側護欄面 3 m (護欄底寬一半 0.32 m)
+const INNER_SHOULDER = 2.0, OUTER_SHOULDER = 3.0, BAR_HALF = 0.32;
+/** 國道主線路肩: 內側 (黃線到路面左緣) 固定 2.4 m、外側 (白線到外側護欄面) 3 m，路寬 = 內側 + 車道 + 外側。
+ *  同車道數的路段車道位置完全一樣 (前後一定接得上)；中央只有一道護欄，照兩條路面的實際幾何放在正中間
+ *  (資料裡中央間距多在 1.2~2.4 m，黃線到護欄面約 1.8~2.4 m，平均 2 m)。
+ *  隧道不加寬，但內側路肩調到讓車道跟隧道外對齊。在分區資料連接完成時就做 (AI、自動駕駛、模擬都一致) */
+const INNER_LS = 2.4;
+function setupMedian(w) {
+  if (w.MED !== undefined) return w.MED;
+  w.MED = null;
+  if (w.city || w.trunk || w.link || !w.oneway || w.lanes < 2 || params.has('oldmedian')) return null;   // 快速道路 (台 61 等) 路肩本來就窄，不套
+  w.hw0 = w.hw; w.width0 = w.width;
+  const L = w.lanes * LANE_W, outer = OUTER_SHOULDER + BARRIER_INSET + BAR_HALF;
+  const laneEdge = (L + outer - INNER_LS) / 2;   // 中心線到黃線 (所有路段一樣)
+  if (w.tunnel) { w.ls = Math.max(0.4, w.hw - laneEdge); w.rs = Math.max(0.3, w.width - L - w.ls); return null; }
+  const MED = medianGaps(w, true);
+  const gs = MED.gap.filter((g) => g != null).sort((a, b) => a - b);
+  const paired = gs.length >= w.n * 0.5, g0 = paired ? gs[gs.length >> 1] : 0;
+  w.width = INNER_LS + L + outer; w.hw = w.width / 2; w.ls = INNER_LS; w.rs = outer;
+  return (w.MED = MED);
+}
+/** 門架 / 看板左側立柱的位置 (路線左法向偏移): 有中央護欄就立在護欄上，否則在路面左緣外 0.6 m */
+function leftPost(w, i) { setupMedian(w); const me = medEdgeAt(w, Math.min(Math.max(i | 0, 0), w.n - 1)); return me != null ? me + BAR_HALF : w.hw + 0.6; }
+/** 第 i 點的中央護欄面 (路線左法向上的偏移)；沒有中央護欄為 null。用原始間距扣掉兩邊各自的加寬量 */
+function medEdgeAt(w, i) {
+  const M = w.MED; if (!M || M.gap[i] == null) return null;
+  const o = M.opp[i], dO = o && o.width0 != null ? (o.width - o.width0) / 2 : 0;
+  return w.hw + (M.gap[i] - (w.width - w.width0) / 2 - dO) / 2 - BAR_HALF;
+}
 function addRoad(c, w) {
+  let MED = setupMedian(w);
+  if (MED) {   // 對向那條也要先設定好寬度，再用實際 (加寬後) 的間距擺中央護欄
+    const pre = medianGaps(w, false);
+    for (const o of new Set(pre.opp.filter(Boolean))) setupMedian(o);
+    MED = medianGaps(w, false);
+  }
   const { P, nx, ny, s, n, hw } = w;
+  // 左緣: 加寬後跟對向路面重疊的地方，路面只鋪到中央護欄中心 (不鋪到對向那邊)
+  const le = new Float32Array(n).fill(hw);
+  if (MED) for (let i = 0; i < n; i++) if (MED.gap[i] != null && MED.gap[i] < 0) le[i] = hw + MED.gap[i] / 2 + 0.05;
   // 路面
   const r = c.road, b0 = r.n;
   for (let i = 0; i < n; i++) {
     const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
     const lsT = w.ls + (w.tunnel ? 100 : 0);   // 隧道旗標: 著色器用 aLs >= 50 判斷
-    r.v(x + nx[i] * hw, y + ny[i] * hw, z); r.uv.push(0, s[i]); r.ls.push(lsT); r.ln.push(w.lanes);
+    r.v(x + nx[i] * le[i], y + ny[i] * le[i], z); r.uv.push(hw - le[i], s[i]); r.ls.push(lsT); r.ln.push(w.lanes);
     r.v(x - nx[i] * hw, y - ny[i] * hw, z); r.uv.push(w.width, s[i]); r.ls.push(lsT); r.ln.push(w.lanes);
   }
   for (let i = 0; i < n - 1; i++) { if (w.M[i] & w.M[i + 1] & 4) continue; const a = b0 + i * 2; r.q(a, a + 1, a + 3, a + 2); }   // bit2: 匝道整段在主線路面內 (fix_clip.mjs)，不畫
@@ -965,13 +1031,13 @@ function addRoad(c, w) {
   const k = c.skirt, s0 = k.n;
   for (let i = 0; i < n; i++) {
     const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-    const lx = x + nx[i] * hw, ly = y + ny[i] * hw, rx = x - nx[i] * hw, ry = y - ny[i] * hw;
+    const lx = x + nx[i] * le[i], ly = y + ny[i] * le[i], rx = x - nx[i] * hw, ry = y - ny[i] * hw;
     k.v(lx, ly, z); k.v(rx, ry, z); k.v(lx, ly, z - depth); k.v(rx, ry, z - depth);
   }
   const M = w.M;
   for (let i = 0; i < n - 1; i++) {
     const a = s0 + i * 4, bb = a + 4;
-    if (!((M[i] | M[i + 1]) & 1)) k.q(a, bb, bb + 2, a + 2);          // 左側 (落在別條路面上就不做)
+    if (!((M[i] | M[i + 1]) & 1) && !(MED && MED.gap[i] != null && MED.gap[i + 1] != null && !w.bridge)) k.q(a, bb, bb + 2, a + 2);          // 左側 (落在別條路面上、或中央分隔接著對向路面就不做)
     if (!((M[i] | M[i + 1]) & 2)) k.q(a + 1, a + 3, bb + 3, bb + 1);  // 右側
     if (w.bridge) k.q(a + 2, bb + 2, bb + 3, a + 3);                 // 梁底
   }
@@ -980,14 +1046,28 @@ function addRoad(c, w) {
     // 每個斷面線段各自一組頂點 (稜角分明)；UV: u = 沿線距離、v = 高度 (給接縫、排水孔、髒污用)
     const g = c.barrier, g0 = g.n, segs = BARRIER.length - 1, per = segs * 2;
     const o = edge + inward * BARRIER_INSET;
+    // 中央分隔 (左側): 對向路面緊鄰時，護欄放在兩條路面正中間 (只有一道)，由 gid 小的那一邊建
+    const medOff = (i) => (bit === 1 && MED && MED.gap[i] != null) ? hw + MED.gap[i] / 2 : o;
+    const notMine = (i) => bit === 1 && MED && MED.gap[i] != null && MED.opp[i] && MED.opp[i].gid < w.gid;
+    if (bit === 1 && MED) {   // 路面鋪到中央護欄底下 (兩邊各鋪一半)
+      const r = c.road, r0 = r.n;
+      for (let i = 0; i < n; i++) {
+        const gi = MED.gap[i] != null ? MED.gap[i] / 2 + 0.05 : 0, x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+        r.v(x + nx[i] * (hw + gi), y + ny[i] * (hw + gi), z); r.uv.push(-gi, s[i]); r.ls.push(w.ls); r.ln.push(w.lanes);
+        r.v(x + nx[i] * hw, y + ny[i] * hw, z); r.uv.push(0, s[i]); r.ls.push(w.ls); r.ln.push(w.lanes);
+      }
+      for (let i = 0; i < n - 1; i++) if (MED.gap[i] != null && MED.gap[i + 1] != null && !((M[i] | M[i + 1]) & 1)) { const a = r0 + i * 2; r.q(a, a + 1, a + 3, a + 2); }
+    }
     for (let i = 0; i < n; i++) {
-      const cx = P[i * 3] + nx[i] * o, cy = P[i * 3 + 1] + ny[i] * o, cz = P[i * 3 + 2];
+      const oi = medOff(i);
+      const cx = P[i * 3] + nx[i] * oi, cy = P[i * 3 + 1] + ny[i] * oi, cz = P[i * 3 + 2];
       for (let j = 0; j < segs; j++) for (const [a, h] of [BARRIER[j], BARRIER[j + 1]]) {
         g.v(cx + nx[i] * a, cy + ny[i] * a, cz + h - 0.03); g.uv.push(s[i], h);
       }
     }
     for (let i = 0; i < n - 1; i++) {
       if ((M[i] | M[i + 1]) & bit) continue;
+      if (notMine(i) && notMine(i + 1)) continue;   // 共用的中央護欄由對向那條建
       for (let j = 0; j < segs; j++) { const a = g0 + i * per + j * 2; g.q(a, a + 1, a + 1 + per, a + per); }
     }
     // 防眩板: 國道主線中央分隔護欄 (左側) 頂上每 4 m 一片，板面幾乎垂直路線 (擋對向車燈、側面看得穿)。
@@ -1005,7 +1085,8 @@ function addRoad(c, w) {
           skip = !!(pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid);
         }
         if (skip) continue;
-        const x = bx + nx[k] * o, y = by + ny[k] * o, a = 0.21;   // 板面轉 12°
+        if (notMine(k)) continue;
+        const ok = medOff(k), x = bx + nx[k] * ok, y = by + ny[k] * ok, a = 0.21;   // 板面轉 12°
         const tx = ny[k] * Math.cos(a) + nx[k] * Math.sin(a), ty = -nx[k] * Math.cos(a) + ny[k] * Math.sin(a);
         box(c.glare, x, y, tx, ty, 0.022, 0.12, z + 0.84, z + 1.55);
         box(c.glare, x, y, ny[k], -nx[k], 0.03, 0.03, z + 0.8, z + 0.9);   // 底座
@@ -1023,7 +1104,8 @@ function addRoad(c, w) {
         const z = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t;
         const pr = roadAt(bx + nx[k] * (hw + 1.6), by + ny[k] * (hw + 1.6), z, 0, 1.5);
         if (pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid) continue;
-        const x = bx + nx[k] * o, y = by + ny[k] * o;
+        if (notMine(k)) continue;
+        const ok = medOff(k), x = bx + nx[k] * ok, y = by + ny[k] * ok;
         box(c.lampPole, x, y, ny[k], -nx[k], 0.09, 0.09, z + 0.85, z + 10.5);
         box(c.lampPole, x, y, ny[k], -nx[k], 0.05, 2.0, z + 10.3, z + 10.42);
         for (const sd of [-1, 1]) {
@@ -1233,9 +1315,12 @@ function box(g, cx, cy, tx, ty, hx, hy, z0, z1) {
 /** 橋墩 (前處理已避開下層道路): 柱子可能往側邊偏移，帽梁延伸過去撐住橋面 */
 function addPier(g, A, k) {
   const q = A.subarray(k * 9, k * 9 + 9);
-  const [x, y, tx, ty, offL, zg, top, capL, capR] = q;
+  let [x, y, tx, ty, offL, zg, top, capL, capR] = q;
   const nx = -ty, ny = tx;
   box(g, x + nx * offL, y + ny * offL, tx, ty, 1.0, 1.25, zg - 1.0, top - 1.4);            // 柱
+  // 國道路肩加寬後橋面變寬: 帽梁兩端跟著加長
+  const r = roadAt(x, y, top + 0.2, -3, 1.0);
+  if (r && r.w.width0 != null) { const d = r.w.hw - r.w.hw0; if (d > 0) { capL -= d; capR += d; } }
   const mid = (capL + capR) / 2;
   box(g, x + nx * mid, y + ny * mid, tx, ty, 0.9, (capR - capL) / 2, top - 1.4, top);      // 帽梁
 }
@@ -1639,7 +1724,7 @@ function streamTick(opts = {}) {
   for (const [key, , , d] of near) {
     const rec = TILES.get(key);
     if (!rec || rec.state !== 'data') continue;
-    if (!rec.linked && neighborsReady(rec)) { rec.joints = computeJoints(rec); rec.linked = true; }
+    if (!rec.linked && neighborsReady(rec)) { rec.joints = computeJoints(rec); rec.linked = true; for (const k of rec.ways) setupMedian(WAYS[k]); }
     if (budget > 0 && rec.linked && !rec.group && d <= MESH_R) { buildTile(rec); budget--; }
   }
   let tb = opts.build === 'all' ? 1e9 : opts.build === false ? 0 : 3;
@@ -2615,6 +2700,12 @@ function update(dt) {
   let nx = S.x + Math.cos(S.h) * S.v * dt, ny = S.y + Math.sin(S.h) * S.v * dt;
   let r = roadAt(nx, ny, S.z, MARGIN);
   if (!r && S.road && S.road.w.city) r = roadAt(nx, ny, S.z, 0.3);   // 一般道路沒有護欄: 大車可以壓到路緣
+  // 國道中央只有一道護欄 (兩邊路面加寬後在中央重疊): 不能穿過它開到對向，也不能壓進護欄
+  if (r && S.road && !r.w.city && !S.road.w.city) {
+    const cw = S.road.w;
+    if (r.w !== cw && r.w.oneway && cw.oneway && !r.w.link && !cw.link && r.tx * S.road.tx + r.ty * S.road.ty < -0.5) r = null;
+    else { const me = medEdgeAt(r.w, r.i); if (me != null && r.lat > me - (MARGIN - 0.35)) r = null; }
+  }
   if (!r && S.road) {
     const tx = S.road.tx, ty = S.road.ty;
     const sgn = Math.cos(S.h) * tx + Math.sin(S.h) * ty >= 0 ? 1 : -1;
@@ -2852,7 +2943,7 @@ window.addEventListener('resize', () => {
 // ---- 給擴充模組 (features.js: 車流、電台、看板) 用的介面
 const HOOKS = { init: [], update: [], frame: [], minimap: [], tile: [], key: [], wayColor: null, navBias: null };
 window.TW = { T, scene, camera, renderer, NIGHT, GLOW_TEX, landcoverAt, WAYS, wayByGid, TILES, TS, tilesNear, PT_INDEX, ptKey, S, LANE_W, roadAt, terrainAt, nextWay, buildCar, HOOKS, params,
-  laneCount, laneOffDir, nextOptions, deadEndAhead, speedLimit, setVehicle, spawn, ORIGIN: INDEX.origin_twd97, MOBILE, WEATHER, keys, tileBuf, roadLabel, toast, toggleMenu,
+  laneCount, laneOffDir, leftPost, nextOptions, deadEndAhead, speedLimit, setVehicle, spawn, ORIGIN: INDEX.origin_twd97, MOBILE, WEATHER, keys, tileBuf, roadLabel, toast, toggleMenu,
   toggleManual, shift, toggleCruise, ensureArea, respawnNearest, SPAWNS: () => SPAWNS, sun,
   get camMode() { return camMode; }, get autopilot() { return autopilot; }, set autopilot(v) { autopilot = !!v; },
   get mapScale() { return MAP_SCALES[mapScaleIdx]; }, MAP_PX: 200 };
@@ -2938,7 +3029,7 @@ setTimeout(async () => {
       '; player bumps', window.TWX ? TWX.stats.bumps : '-', '; AI overlaps', window.TWX ? TWX.overlaps() : '-',
       '; AI lane changes', window.TWX ? TWX.stats.laneChanges : '-', '; player lane changes', S.apChanges || 0,
       '; pos', S.x.toFixed(1), S.y.toFixed(1), S.z.toFixed(1), 'zVis', S.zVis, '; road', S.road ? (S.road.w.name || S.road.w.k) : null,
-      '; lead', HOOKS.leader ? JSON.stringify(HOOKS.leader(0)) : '-', '; city turns', window.TWX ? TWX.stats.turns : '-', '; nan', window.TWX ? TWX.stats.nan : '-', '; joints', window.TWX ? (TWX.stats.joints || 0) : '-');
+      '; lead', HOOKS.leader ? (() => { const l = HOOKS.leader(0); return JSON.stringify({ gap: l.gap, v: l.v }); })() : '-', '; city turns', window.TWX ? TWX.stats.turns : '-', '; nan', window.TWX ? TWX.stats.nan : '-', '; joints', window.TWX ? (TWX.stats.joints || 0) : '-');
   }
   if (params.has('t')) await ensureArea(S.x, S.y);
   syncCar(0); updateCamera(1); updateDayNight(0);
