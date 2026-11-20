@@ -939,7 +939,7 @@ function mergedGroup(tmp) {
 const signs = LIVE.cms.map((c) => ({ ...c, pages: (c.pages || []).map((p) => ({ text: cleanText(p.text), type: String(p.type || '') })).filter((p) => p.text), model: null, page: 0 }));
 function buildSign(sg) {
   const w = TW.wayByGid(sg.way), hw = w.hw;
-  const XL = -TW.leftPost(w, sg.idx), XR = hw + 0.9, H = 7, TH = 1.1;
+  const XL = -TW.leftPost(w, sg.idx), XR = TW.rightEdge(w, sg.idx) + 0.9, H = 7, TH = 1.1;
   const root = new T.Group();
   const truss = trussGroup(XL, XR, H, TH);
   const BW = Math.min(8, XR - XL - 6), BH = 2.3, BY = H + TH + BH / 2 + 0.15, BX = (XL + XR) / 2;
@@ -1021,7 +1021,7 @@ async function pollCms() {
 // ---- ETC 門架: 全部建 (合併後每座 2~3 個繪製呼叫)
 function buildEtc(g) {
   const w = TW.wayByGid(g.way), hw = w.hw;
-  const XL = -TW.leftPost(w, g.idx), XR = hw + 0.9, H = 6.4, TH = 1.0;
+  const XL = -TW.leftPost(w, g.idx), XR = TW.rightEdge(w, g.idx) + 0.9, H = 6.4, TH = 1.0;
   const truss = trussGroup(XL, XR, H, TH);
   // 每車道一組偵測器 (天線箱 + 攝影機)
   for (let ln = 0; ln < w.lanes; ln++) {
@@ -1176,7 +1176,7 @@ function signMat(cv) {
 const backMat = new T.MeshStandardMaterial({ color: new T.Color(0.42, 0.44, 0.46), metalness: 0.6, roughness: 0.5 });
 function buildGuide(gd) {
   const w = TW.wayByGid(gd.gid), hw = w.hw;
-  const XL = -TW.leftPost(w, gd.idx), XR = hw + 0.9, H = 6.1, TH = 1.0;
+  const XL = -TW.leftPost(w, gd.idx), XR = TW.rightEdge(w, gd.idx) + 0.9, H = 6.1, TH = 1.0;
   const root = new T.Group();
   root.add(mergedGroup(trussGroup(XL, XR, H, TH)));
   const ex = exitPanel(gd), th = gd.thru.map(thruPanel), tab = gd.ref ? exitTab(gd) : null;

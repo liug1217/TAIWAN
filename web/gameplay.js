@@ -320,7 +320,7 @@ const cams = (() => {
     // 從路面中心往右推到路緣外
     const w = r.w, nx = w.nx[r.i], ny = w.ny[r.i], cxp = x - nx * r.lat, cyp = y - ny * r.lat;
     const side = Math.sign(rx * nx + ry * ny) || 1;   // 右手邊在左法向的哪一側
-    const off = side > 0 ? w.hw + extraOff : -(w.hw + extraOff);
+    const off = side > 0 ? w.hw + (w.eL ? w.eL[r.i] : 0) + extraOff : -(TW.rightEdge(w, r.i) + extraOff);   // 國道右側路肩有加寬
     const px = cxp + nx * off, py = cyp + ny * off;
     obj.position.set(px, r.z, -py); obj.rotation.y = h - Math.PI / 2;   // +z 面向來車、-x 伸向路面
     return true;
@@ -418,7 +418,7 @@ const distSigns = (() => {
   function build(d) {
     const w = TW.wayByGid(d.gid); if (!w) return null;
     const root = new T.Group(), p = panel(d.list);
-    const X = w.hw + 1.0 + p.w / 2, Y0 = 2.4;
+    const X = TW.rightEdge(w, d.idx) + 1.0 + p.w / 2, Y0 = 2.4;
     const m = new T.Mesh(new T.PlaneGeometry(p.w, p.h), G.signMat(p.cv)); m.position.set(X, Y0 + p.h / 2, 0.05); root.add(m);
     const b = new T.Mesh(new T.BoxGeometry(p.w, p.h, 0.06), G.backMat); b.position.set(X, Y0 + p.h / 2, 0.0); root.add(b);
     for (const px of [X - p.w * 0.32, X + p.w * 0.32]) { const post = new T.Mesh(new T.CylinderGeometry(0.08, 0.08, Y0 + p.h, 10), G.backMat); post.position.set(px, (Y0 + p.h) / 2, -0.08); root.add(post); }
