@@ -1199,32 +1199,54 @@ function addGore(c, w, r) {
 // ======================================================================= 伸縮縫 (橋梁接縫)
 // 每座橋墩上方與橋頭各一道；車輪壓過時「叩」一聲 (前輪、後輪各一下)
 const JOINTS = [], JGRID = new Map(), JCELL = 50;
-function addJoint(x, y, tx, ty, hw, z) {
-  const j = { x, y, tx, ty, hw, z };
+// 伸縮縫 = { x, y: 路中心線上的點, z, tx, ty: 路線方向, hL, hR: 往左 / 往右到路緣 (含加寬的路肩) }
+function addJoint(j) {
   JOINTS.push(j);
-  const r = hw + 2;
-  for (let cx = Math.floor((x - r) / JCELL); cx <= Math.floor((x + r) / JCELL); cx++)
-    for (let cy = Math.floor((y - r) / JCELL); cy <= Math.floor((y + r) / JCELL); cy++) {
+  const r = Math.max(j.hL, j.hR) + 2;
+  for (let cx = Math.floor((j.x - r) / JCELL); cx <= Math.floor((j.x + r) / JCELL); cx++)
+    for (let cy = Math.floor((j.y - r) / JCELL); cy <= Math.floor((j.y + r) / JCELL); cy++) {
       const k = cx * 100003 + cy;
       let a = JGRID.get(k); if (!a) JGRID.set(k, a = []); a.push(j);
     }
 }
 const JSEEN = new Set();
-/** 分區的伸縮縫 (需要鄰區資料: 橋頭判斷、橋墩上方路面) -> [[x, y, z, tx, ty, hw]] */
+/** 路段 w 第 i 段上、離 (x, y) 最近的中心線點 -> 伸縮縫 (垂直路線、左右到路緣) */
+function jointOn(w, i, x, y) {
+  setupShoulders(w);
+  const P = w.P, ax = P[i * 3], ay = P[i * 3 + 1], dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L = Math.hypot(dx, dy) || 1;
+  const t = Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / (L * L)));
+  const lerp = (a) => a ? a[i] + (a[i + 1] - a[i]) * t : 0;
+  return { x: ax + dx * t, y: ay + dy * t, z: P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t, tx: dx / L, ty: dy / L,
+    hL: w.hw + lerp(w.eL), hR: w.hw + lerp(w.eR), k: w.k };
+}
+/** 分區的伸縮縫 (需要鄰區資料: 橋頭判斷、橋墩上方路面) */
 function computeJoints(rec) {
   const out = [];
-  const mk = (x, y, z, tx, ty, hw) => {
-    const key = Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z);
+  const mk = (j) => {
+    const key = j.k + ':' + Math.round(j.x) + ',' + Math.round(j.y);   // 每條路各自一道 (同一座橋墩撐兩個方向時兩邊都要有)
     if (JSEEN.has(key)) return;
-    JSEEN.add(key);
-    out.push([x, y, z, tx, ty, hw]);
-    addJoint(x, y, tx, ty, hw, z);
+    JSEEN.add(key); out.push(j); addJoint(j);
   };
   const A = rec.piers;
-  for (let k = 0; k < A.length / 9; k++) {   // 橋墩上方
-    const x = A[k * 9], y = A[k * 9 + 1], tx = A[k * 9 + 2], ty = A[k * 9 + 3], top = A[k * 9 + 6];
-    const r = roadAt(x, y, top + 2.5, 0, 1.0);
-    if (r && Math.abs(r.z - (top + 2.2)) < 1.5) mk(x, y, r.z, tx, ty, r.w.hw);
+  for (let k = 0; k < A.length / 9; k++) {   // 橋墩上方: 帽梁上的每一條橋面 (不只最高那條)
+    const x = A[k * 9], y = A[k * 9 + 1], top = A[k * 9 + 6];
+    const cells = new Set();
+    for (const [ox, oy] of [[0, 0], [-16, 0], [16, 0], [0, -16], [0, 16]]) cells.add(cellKey(Math.floor((x + ox) / CELL), Math.floor((y + oy) / CELL)));
+    const best = new Map();   // way -> { d, i }
+    for (const ck of cells) {
+      const a = GRID.get(ck); if (!a) continue;
+      for (let q = 0; q < a.length; q += 2) {
+        const w = WAYS[a[q]], i = a[q + 1];
+        if (w.city || w.tunnel) continue;
+        const P = w.P, ax = P[i * 3], ay = P[i * 3 + 1], dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L2 = dx * dx + dy * dy;
+        if (L2 < 1e-6) continue;
+        const t = ((x - ax) * dx + (y - ay) * dy) / L2; if (t < 0 || t > 1) continue;
+        const lat = Math.abs(((x - ax) * -dy + (y - ay) * dx) / Math.sqrt(L2)), z = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t;
+        if (Math.abs(z - (top + 2.2)) > 1.5 || lat > w.hw + 16) continue;   // 在這座帽梁上 (高度對、橫向在帽梁範圍內)
+        const b = best.get(w); if (!b || lat < b.d) best.set(w, { d: lat, i });
+      }
+    }
+    for (const [w, b] of best) mk(jointOn(w, b.i, x, y));
   }
   for (const k of rec.ways) {             // 橋頭 (橋接地面路段處)
     const w = WAYS[k];
@@ -1232,22 +1254,23 @@ function computeJoints(rec) {
     for (const i of [0, w.n - 1]) {
       const others = PT_INDEX.get(ptKey(w.P[i * 3], w.P[i * 3 + 1])) || [];
       if (!others.some(([o]) => o !== w.k && !WAYS[o].bridge)) continue;
-      mk(w.P[i * 3], w.P[i * 3 + 1], w.P[i * 3 + 2], w.ny[i], -w.nx[i], w.hw);
+      mk(jointOn(w, Math.min(i, w.n - 2), w.P[i * 3], w.P[i * 3 + 1]));
     }
   }
   return out;
 }
 function jointMeshes(list, group) {
   const steel = new GB(), rubber = new GB();
-  for (const [x, y, z, tx, ty, hw] of list) {
-    const span = hw - 0.25;
-    box(steel, x + tx * 0.17, y + ty * 0.17, tx, ty, 0.12, span, z - 0.03, z + 0.012);
-    box(steel, x - tx * 0.17, y - ty * 0.17, tx, ty, 0.12, span, z - 0.03, z + 0.012);
-    box(rubber, x, y, tx, ty, 0.05, span, z - 0.03, z + 0.004);
+  for (const j of list) {
+    const nx = -j.ty, ny = j.tx, half = (j.hL + j.hR) / 2 - 0.25, off = (j.hL - j.hR) / 2;   // 不對稱: 中心往寬的那邊移
+    const cx = j.x + nx * off, cy = j.y + ny * off;
+    box(steel, cx + j.tx * 0.17, cy + j.ty * 0.17, j.tx, j.ty, 0.12, half, j.z - 0.03, j.z + 0.012);
+    box(steel, cx - j.tx * 0.17, cy - j.ty * 0.17, j.tx, j.ty, 0.12, half, j.z - 0.03, j.z + 0.012);
+    box(rubber, cx, cy, j.tx, j.ty, 0.05, half, j.z - 0.03, j.z + 0.004);
   }
   for (const m of [steel.mesh(matJointSteel), rubber.mesh(matJointRubber)]) if (m) group.add(m);
 }
-/** 車軸從 (ax,ay) 移到 (bx,by) 時有沒有壓過伸縮縫 */
+/** 車軸從 (ax,ay) 移到 (bx,by) 時有沒有壓過伸縮縫 (左右範圍分開算) */
 function crossedJoint(ax, ay, bx, by, z) {
   const a = JGRID.get(Math.floor(bx / JCELL) * 100003 + Math.floor(by / JCELL));
   if (!a) return false;
@@ -1256,7 +1279,7 @@ function crossedJoint(ax, ay, bx, by, z) {
     const d0 = (ax - j.x) * j.tx + (ay - j.y) * j.ty, d1 = (bx - j.x) * j.tx + (by - j.y) * j.ty;
     if (d0 * d1 > 0 || d0 === d1) continue;
     const lat = (bx - j.x) * -j.ty + (by - j.y) * j.tx;
-    if (Math.abs(lat) <= j.hw) return true;
+    if (lat <= j.hL && -lat <= j.hR) return true;
   }
   return false;
 }
@@ -1730,7 +1753,7 @@ function streamTick(opts = {}) {
   for (const [key, , , d] of near) {
     const rec = TILES.get(key);
     if (!rec || rec.state !== 'data') continue;
-    if (!rec.linked && neighborsReady(rec)) { rec.joints = computeJoints(rec); rec.linked = true; for (const k of rec.ways) setupShoulders(WAYS[k]); }
+    if (!rec.linked && neighborsReady(rec)) { for (const k of rec.ways) setupShoulders(WAYS[k]); rec.joints = computeJoints(rec); rec.linked = true; }   // 路肩先設定，伸縮縫才量得到加寬後的路緣
     if (budget > 0 && rec.linked && !rec.group && d <= MESH_R) { buildTile(rec); budget--; }
   }
   let tb = opts.build === 'all' ? 1e9 : opts.build === false ? 0 : 3;
