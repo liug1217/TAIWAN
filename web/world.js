@@ -253,6 +253,39 @@ function addReflector(B, x, y, z0, tx, ty) {
   for (let i = 0; i < fs; i++) F.i.push(f0, f0 + 1 + ((i + 1) % fs), f0 + 1 + i);
 }
 
+/** 節點 i 某一側 (side = +1 左 / -1 右) 跟旁邊同高度平行道路之間的空隙 (路緣到路緣，含加寬路肩)。
+ *  分岔 / 匯流處兩條路慢慢分開時，中間會露出底下的側牆與地面 (很醜)，用這個量來補平 */
+const GAP_FILL = 12, GAP_LOG = params.has('gaplog') ? { n: 0 } : null;
+function edgeGap(w, i, side) {
+  const x = w.P[i * 3], y = w.P[i * 3 + 1], z = w.P[i * 3 + 2], nx = w.nx[i], ny = w.ny[i], tx = ny, ty = -nx;
+  const mine = w.hw + (side > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0)), R = mine + GAP_FILL + 16;
+  let best = null;
+  const seen = new Set();
+  for (let cx = Math.floor((x - R) / CELL); cx <= Math.floor((x + R) / CELL); cx++) for (let cy = Math.floor((y - R) / CELL); cy <= Math.floor((y + R) / CELL); cy++) {
+    const a = GRID.get(cellKey(cx, cy)); if (!a) continue;
+    for (let j = 0; j < a.length; j += 2) {
+      const o = WAYS[a[j]], si = a[j + 1];
+      if (!o || o === w || o.city || o.tunnel) continue;
+      const id = a[j] * 100000 + si; if (seen.has(id)) continue; seen.add(id);
+      const ax = o.P[si * 3], ay = o.P[si * 3 + 1], L = Math.hypot(o.P[si * 3 + 3] - ax, o.P[si * 3 + 4] - ay);
+      if (L < 1e-3) continue;
+      const ux = (o.P[si * 3 + 3] - ax) / L, uy = (o.P[si * 3 + 4] - ay) / L, dot = ux * tx + uy * ty;
+      if (Math.abs(dot) < 0.85) continue;
+      const t = (x - ax) * ux + (y - ay) * uy; if (t < 0 || t > L) continue;
+      const qx = ax + ux * t, qy = ay + uy * t, qz = o.P[si * 3 + 2] + (o.P[si * 3 + 5] - o.P[si * 3 + 2]) * (t / L);
+      if (Math.abs(qz - z) > 0.8) continue;
+      const lat = (qx - x) * nx + (qy - y) * ny; if (lat * side <= 0) continue;
+      setupShoulders(o);
+      const f = t / L, ex = (arr) => arr ? arr[si] + (arr[si + 1] - arr[si]) * f : 0;
+      const facesLeft = (lat > 0) === (dot > 0);   // 對方面向我的是它的左側還是右側
+      const theirs = o.hw + (facesLeft ? ex(o.eR) : ex(o.eL));
+      const g = Math.abs(lat) - mine - theirs;
+      if (g < -0.3 || g > GAP_FILL) continue;
+      if (!best || g < best.g) best = { g, z: qz };
+    }
+  }
+  return best;
+}
 function addRoad(B, w) {
   setupShoulders(w);
   const { P, nx, ny, s, n, hw, M } = w;
@@ -275,6 +308,21 @@ function addRoad(B, w) {
     sl.add([[lx, ly, z], [lx, ly, z - depth]], okL);
     sr.add([[rx, ry, z], [rx, ry, z - depth]], okR);
     if (sb) sb.add([[lx, ly, z - depth], [rx, ry, z - depth]]);
+  }
+  // 分岔 / 匯流楔形空隙: 兩條路各補一半 (混凝土鋪面，跟路面同高)，蓋住底下的側牆
+  if (!w.tunnel && !w.city && !params.has('nofill')) for (const side of [1, -1]) {
+    const bit = side > 0 ? 1 : 2, fs = new Strip(B, 'skirt', [[0, 1]]);
+    let prev = false;
+    for (let i = 0; i < n; i++) {
+      const gp = (M[i] & bit) ? null : edgeGap(w, i, side);
+      const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], e = hw + (side > 0 ? EL(i) : ER(i)) - 0.05;
+      if (!gp || gp.g < 0.05) { prev = false; continue; }
+      const o = e + gp.g / 2 + 0.1, zz = Math.min(z, (z + gp.z) / 2) - 0.015;
+      if (GAP_LOG && GAP_LOG.n < 12 && gp.g > 1) { GAP_LOG.n++; console.log('[test] gap ' + w.gid + ' ' + i + ' g ' + gp.g.toFixed(1) + ' at ' + x.toFixed(0) + ',' + y.toFixed(0) + ',' + z.toFixed(1)); }
+      const a = [x + nx[i] * side * e, y + ny[i] * side * e, zz], b = [x + nx[i] * side * o, y + ny[i] * side * o, zz];
+      fs.add(side > 0 ? [b, a] : [a, b], prev);
+      prev = true;
+    }
   }
   // 紐澤西護欄 (左右；分合流處落在別條路面上的段落不放；隧道內是檢修步道，不放)
   if (!w.tunnel) for (const [edge, inward, bit] of [[hw, -1, 1], [-hw, 1, 2]]) {
@@ -648,10 +696,56 @@ function portalMesh(w, i) {
 function addCityRoad(B, w) {
   const { P, nx, ny, s, n, hw } = w;
   const code = w.cls === 5 ? 0 : (w.oneway ? w.lanes : -w.lanes);   // 0: 巷道無標線；負: 雙向 (中央雙黃線)
-  const r = new Strip(B, 'city', [[0, 1]]);
+  // 路口: 跟別條市區道路共用節點的地方，交叉路面範圍內不畫標線 (舊版標線會一路畫穿路口、兩條路的線疊在一起)；
+  // 次要道路在路口內往下 3 cm，避免兩條路面在路口閃爍
+  const zones = [];
   for (let i = 0; i < n; i++) {
-    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-    r.add([[x + nx[i] * hw, y + ny[i] * hw, z, 0, s[i], w.width, code], [x - nx[i] * hw, y - ny[i] * hw, z, w.width, s[i], w.width, code]]);
+    let rr = 0, rz = 0, minor = false;
+    const hit = (o) => {
+      rr = Math.max(rr, o.hw + 0.8); rz = Math.max(rz, o.hw - 0.4);
+      if (o.width > w.width + 0.01 || (Math.abs(o.width - w.width) <= 0.01 && o.gid < w.gid)) minor = true;
+    };
+    const seenO = new Set();
+    for (const [k] of PT_INDEX.get(ptKey(P[i * 3], P[i * 3 + 1])) || []) { const o = WAYS[k]; if (o && o !== w && o.city) { seenO.add(o); hit(o); } }
+    // 沒有共用節點的交叉 (OSM 偶爾沒接上): 別條市區道路的中心線從這個節點旁邊斜斜穿過
+    const x0 = P[i * 3], y0 = P[i * 3 + 1], z0 = P[i * 3 + 2], tx0 = i < n - 1 ? P[i * 3 + 3] - x0 : x0 - P[i * 3 - 3], ty0 = i < n - 1 ? P[i * 3 + 4] - y0 : y0 - P[i * 3 - 2], tl = Math.hypot(tx0, ty0) || 1;
+    for (let cx = Math.floor((x0 - 20) / CELL); cx <= Math.floor((x0 + 20) / CELL); cx++) for (let cy = Math.floor((y0 - 20) / CELL); cy <= Math.floor((y0 + 20) / CELL); cy++) {
+      const a = GRID.get(cellKey(cx, cy)); if (!a) continue;
+      for (let j = 0; j < a.length; j += 2) {
+        const o = WAYS[a[j]], si = a[j + 1]; if (!o || o === w || !o.city || seenO.has(o)) continue;
+        const ax = o.P[si * 3], ay = o.P[si * 3 + 1], dx = o.P[si * 3 + 3] - ax, dy = o.P[si * 3 + 4] - ay, L = Math.hypot(dx, dy); if (L < 0.5) continue;
+        if (Math.abs((dx * tx0 + dy * ty0) / (L * tl)) > 0.8) continue;   // 平行的不算
+        const t = Math.min(1, Math.max(0, ((x0 - ax) * dx + (y0 - ay) * dy) / (L * L)));
+        if (Math.hypot(ax + dx * t - x0, ay + dy * t - y0) > o.hw + 0.5) continue;
+        if (Math.abs(o.P[si * 3 + 2] + (o.P[si * 3 + 5] - o.P[si * 3 + 2]) * t - z0) > 1.5) continue;
+        seenO.add(o); hit(o);
+      }
+    }
+    if (rr > 0) zones.push({ c: s[i], r: Math.min(rr, 25), rz: Math.min(Math.max(rz, 0), 24), minor });
+  }
+  // 雙向分隔的道路在路口會有兩個交點，中間那一小段 (路口中央) 也不畫標線: 相距不到 12 m 的路口範圍合併
+  const iv = zones.map((q) => [q.c - q.r, q.c + q.r]).sort((a, b) => a[0] - b[0]), mark = [];
+  for (const v of iv) { const L = mark[mark.length - 1]; if (L && v[0] - L[1] < 12) L[1] = Math.max(L[1], v[1]); else mark.push(v.slice()); }
+  const inZone = (d) => mark.some((v) => d >= v[0] && d <= v[1]);
+  const sunk = (d) => zones.some((q) => q.minor && Math.abs(d - q.c) <= q.rz);   // 下沉段的高低差藏在主要道路路面底下
+  const st = [];
+  for (let i = 0; i < n; i++) st.push([s[i], i]);
+  for (const q of zones) for (const e of [-q.rz - 0.02, -q.rz, q.rz, q.rz + 0.02]) { const d = q.c + e; if (d > 0.01 && d < s[n - 1] - 0.01) st.push([d, -1]); }
+  for (const v of mark) for (const d of [v[0] - 0.02, v[0], v[1], v[1] + 0.02]) if (d > 0.01 && d < s[n - 1] - 0.01) st.push([d, -1]);
+  st.sort((a, b) => a[0] - b[0]);
+  const r = new Strip(B, 'city', [[0, 1]]);
+  let k = 0;
+  for (const [d, node] of st) {
+    while (k < n - 2 && s[k + 1] < d) k++;
+    let x, y, z, ux, uy;
+    if (node >= 0) { x = P[node * 3]; y = P[node * 3 + 1]; z = P[node * 3 + 2]; ux = nx[node]; uy = ny[node]; }
+    else {
+      const t = Math.min(1, Math.max(0, (d - s[k]) / ((s[k + 1] - s[k]) || 1)));
+      x = P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t; y = P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t; z = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t;
+      ux = nx[k] + (nx[k + 1] - nx[k]) * t; uy = ny[k] + (ny[k + 1] - ny[k]) * t; const l = Math.hypot(ux, uy) || 1; ux /= l; uy /= l;
+    }
+    const cd = zones.length && inZone(d) ? 0 : code, zz = zones.length && sunk(d) ? z - 0.03 : z;
+    r.add([[x + ux * hw, y + uy * hw, zz, 0, d, w.width, cd], [x - ux * hw, y - uy * hw, zz, w.width, d, w.width, cd]]);
   }
   if (!w.bridge) return;
   const depth = 1.6, sl = new Strip(B, 'skirt', [[1, 0]]), sr = new Strip(B, 'skirt', [[0, 1]]), sb = new Strip(B, 'skirt', [[1, 0]]);

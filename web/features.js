@@ -898,7 +898,7 @@ const texMat = (cv) => { const t = new T.CanvasTexture(cv); t.colorSpace = T.SRG
 /** 門架本體 (照國道街景): 暫存群組，之後依材質合併
  *  - 立柱: 每邊兩根粗圓管，沿路方向前後相距 2*cz (實景很寬，約 2.4 m)，中間之字形斜撐
  *    中央那根立在中央護欄上 (護欄在那一段降低，baseL)；外側那根不在護欄上，立在護欄外的地上 (baseR、混凝土基礎)
- *  - 橫梁: 四根主管的立體桁架 (前後 2*tz、上下 TH)，前後面 V 形斜撐 + 直桿，上下面斜撐；柱頂內側斜撐撐到下弦
+ *  - 橫梁: 四根主管的立體桁架 (前後 2*tz、上下 TH)，前後面 V 形斜撐 + 直桿，上下面斜撐 (柱頂不加內側斜撐)
  *  - 區域座標: x = 橫向 (左負右正)、y = 高、z = 沿路 (+z 面向來車)
  */
 const galvMat = new T.MeshStandardMaterial({ color: new T.Color(0.62, 0.65, 0.68), metalness: 0.55, roughness: 0.42 });
@@ -928,8 +928,6 @@ function trussGroup(XL, XR, H, TH, o = {}) {
     // 柱頂: 橫梁穿過的框 (兩根立柱之間的橫桿 + 斜撐)
     for (const y of [H, top]) rod([px, y, -cz], [px, y, cz], 0.07);
     rod([px, H, -cz], [px, top, cz], 0.05); rod([px, H, cz], [px, top, -cz], 0.05);
-    const s = px < 0 ? 1 : -1;
-    for (const z of [-cz, cz]) rod([px, H - 1.9, z], [px + s * 2.0, H, Math.sign(z) * tz], 0.065);   // 柱頂斜撐
   }
   // ---- 橫梁 (立體桁架)
   const x0 = XL - 0.25, x1 = XR + 0.25, nSeg = Math.max(4, Math.round((x1 - x0) / Math.max(1.5, TH * 0.75))), step = (x1 - x0) / nSeg;
