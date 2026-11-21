@@ -189,9 +189,10 @@ const GLOW_LAMP_TEX_HOOK = () => { matRetroGlow.uniforms.map.value = GLOW_TEX; m
 const HPS = [1.0, 0.3, 0.035];   // 國道路燈 = 高壓鈉燈 (約 2000 K、色度 x≈0.53 y≈0.415 → 線性 sRGB，畫面上約 #FF9535 橘色)
 const GLOW_LAMP = new T.PointsMaterial({ map: GLOW_TEX, color: new T.Color(...HPS), size: 4.5, sizeAttenuation: true, transparent: true, depthWrite: false, blending: T.AdditiveBlending, opacity: 0, toneMapped: false, fog: false });
 const matLampPole = new T.MeshStandardMaterial({ color: new T.Color(0.42, 0.44, 0.46), metalness: 0.6, roughness: 0.45 });
-// 隔音牆: 下半實心板 (灰綠)、上半透明壓克力 (淡青)，H 型鋼柱
-const matSoundWall = new T.MeshStandardMaterial({ color: new T.Color(0.2, 0.25, 0.22), roughness: 0.85, metalness: 0.1 });
-const matSoundGlass = new T.MeshStandardMaterial({ color: new T.Color(0.55, 0.72, 0.72), roughness: 0.12, metalness: 0.15, transparent: true, opacity: 0.32, depthWrite: false, side: T.DoubleSide });
+// 隔音牆 (照國道街景): 全部實心板、沒有玻璃。下段深綠、上段淺綠 (橫向壓紋)，淺綠色 H 型鋼柱
+const matSoundWall = new T.MeshStandardMaterial({ color: new T.Color(0.05, 0.3, 0.12), roughness: 0.75, metalness: 0.1 });
+const matSoundUpper = new T.MeshStandardMaterial({ color: new T.Color(0.3, 0.58, 0.34), roughness: 0.7, metalness: 0.1 });
+const matSoundPost = new T.MeshStandardMaterial({ color: new T.Color(0.42, 0.72, 0.42), roughness: 0.6, metalness: 0.2 });
 // 路邊廣告看板 (內容都是虛構的)：一張 3×2 格的貼圖集，每面看板取一格
 const BILLBOARD_TEX = (() => {
   const cv = document.createElement('canvas'); cv.width = 2048; cv.height = 1024; const x = cv.getContext('2d');
@@ -651,5 +652,5 @@ const TERRAIN_SPEC = {
 };
 const matTerrain = patch(new T.MeshStandardMaterial({ roughness: 0.95, metalness: 0 }), TERRAIN_SPEC);
 
-Object.assign(TW, { renderer, MOBILE, scene, camera, SUN_DIR, NIGHT, WEATHER, sun, smooth01, updateDayNight, cycleTime, GLOW_TEX, GLOW_LAMP, matLampPole, matSoundWall, matSoundGlass, matBillboard, matBillboardBack, matLampHead, patch, matAsphalt, matConcrete, matBarrier, matGore, matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber, matReflR, matReflBlack, matRetro, matRetroGlow, matReflY, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, WATER_T, matWater, TERRAIN_SPEC, matTerrain });
+Object.assign(TW, { renderer, MOBILE, scene, camera, SUN_DIR, NIGHT, WEATHER, sun, smooth01, updateDayNight, cycleTime, GLOW_TEX, GLOW_LAMP, matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, patch, matAsphalt, matConcrete, matBarrier, matGore, matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber, matReflR, matReflBlack, matRetro, matRetroGlow, matReflY, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, WATER_T, matWater, TERRAIN_SPEC, matTerrain });
 })();

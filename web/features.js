@@ -896,52 +896,51 @@ const darkMat = new T.MeshStandardMaterial({ color: new T.Color(0.018, 0.02, 0.0
 const texMat = (cv) => { const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 4; return new T.MeshBasicMaterial({ map: t, toneMapped: false }); };
 
 /** 門架本體 (照國道街景): 暫存群組，之後依材質合併
- *  - 立柱: 每邊兩根圓管 (前後相距 1 m) + 之字形斜撐與橫撐的格構柱，立在護欄頂上
- *  - 橫梁: 四根主管的立體桁架 (前後 1 m、上下 TH)，前、後、上、下四面都是 V 形斜撐；柱頂兩側有斜撐
+ *  - 立柱: 每邊兩根粗圓管 (沿路方向前後相距 2*TZ)，中間之字形斜撐，立在護欄頂上；柱頂內側有斜撐撐到下弦
+ *  - 橫梁: 四根主管的立體桁架 (前後 2*TZ、上下 TH)，前後面 V 形斜撐 + 直桿，上下面斜撐
  *  - 區域座標: x = 橫向 (左負右正)、y = 高、z = 沿路 (+z 面向來車)
  */
 const galvMat = new T.MeshStandardMaterial({ color: new T.Color(0.62, 0.65, 0.68), metalness: 0.55, roughness: 0.42 });
-function trussGroup(XL, XR, H, TH, base = 0.87) {
-  const g = new T.Group(), UP = new T.Vector3(0, 1, 0), TZ = 0.5;
+function trussGroup(XL, XR, H, TH, base = 0.87, TZ = 0.5) {
+  const g = new T.Group(), UP = new T.Vector3(0, 1, 0);
   const rod = (a, b, r, mat = galvMat) => {
     const A = new T.Vector3(...a), B = new T.Vector3(...b), d = B.clone().sub(A), len = d.length();
     if (len < 0.01) return;
-    const m = new T.Mesh(new T.CylinderGeometry(r, r, len, r > 0.1 ? 10 : 6, 1, r < 0.1), mat);
+    const m = new T.Mesh(new T.CylinderGeometry(r, r, len, r > 0.1 ? 12 : 6, 1, r < 0.1), mat);
     m.position.copy(A).add(B).multiplyScalar(0.5); m.quaternion.setFromUnitVectors(UP, d.normalize()); g.add(m);
   };
+  const plate = (x, y, z, w, h, d) => { const m = new T.Mesh(new T.BoxGeometry(w, h, d), galvMat); m.position.set(x, y, z); g.add(m); };
   const top = H + TH;
-  // ---- 立柱 (格構柱)
+  // ---- 立柱 (兩根粗管 + 之字斜撐)
   for (const px of [XL, XR]) {
     for (const z of [-TZ, TZ]) {
-      rod([px, base, z], [px, top + 0.15, z], 0.15);
-      const bp = new T.Mesh(new T.BoxGeometry(0.55, 0.05, 0.55), galvMat); bp.position.set(px, base + 0.025, z); g.add(bp);   // 底板
+      rod([px, base, z], [px, top + 0.12, z], 0.16);
+      plate(px, base + 0.025, z, 0.6, 0.05, 0.6);                // 底板
+      plate(px, top + 0.14, z, 0.4, 0.04, 0.4);                  // 柱頂蓋板
     }
-    const n = Math.max(3, Math.round((top - base) / 1.25)), st = (top - base) / n;
-    for (let k = 0; k <= n; k++) {
-      const y = base + k * st;
-      rod([px, y, -TZ], [px, y, TZ], 0.045);                                                     // 橫撐
-      if (k < n) rod([px, y, k % 2 ? TZ : -TZ], [px, y + st, k % 2 ? -TZ : TZ], 0.04);           // 之字斜撐
-    }
-    // 柱頂斜撐 (柱子往內撐到下弦)
+    const n = Math.max(3, Math.round((H - base) / 1.1)), st = (H - base) / n;
+    rod([px, base + 0.3, -TZ], [px, base + 0.3, TZ], 0.05);
+    for (let k = 0; k < n; k++) { const y = base + k * st, a = k % 2 ? TZ : -TZ; rod([px, y + (k ? 0 : 0.3), a], [px, y + st, -a], 0.045); }
+    rod([px, H, -TZ], [px, H, TZ], 0.05); rod([px, top, -TZ], [px, top, TZ], 0.05); rod([px, H, -TZ], [px, top, TZ], 0.045);
     const s = px < 0 ? 1 : -1;
-    for (const z of [-TZ, TZ]) rod([px, H - 1.6, z], [px + s * 1.8, H, z], 0.06);
+    for (const z of [-TZ, TZ]) rod([px, H - 1.9, z], [px + s * 2.0, H, z], 0.065);   // 柱頂斜撐
   }
   // ---- 橫梁 (立體桁架)
-  const x0 = XL - 0.25, x1 = XR + 0.25, nSeg = Math.max(4, Math.round((x1 - x0) / 1.5)), step = (x1 - x0) / nSeg;
-  for (const z of [-TZ, TZ]) for (const y of [H, top]) rod([x0, y, z], [x1, y, z], 0.085);   // 四根主管
+  const x0 = XL - 0.25, x1 = XR + 0.25, nSeg = Math.max(4, Math.round((x1 - x0) / Math.max(1.5, TH * 0.75))), step = (x1 - x0) / nSeg;
+  for (const z of [-TZ, TZ]) for (const y of [H, top]) rod([x0, y, z], [x1, y, z], 0.09);   // 四根主管
   for (let k = 0; k <= nSeg; k++) {
     const x = x0 + k * step;
-    for (const z of [-TZ, TZ]) rod([x, H, z], [x, top, z], 0.035);   // 前後面直桿
-    rod([x, H, -TZ], [x, H, TZ], 0.035); rod([x, top, -TZ], [x, top, TZ], 0.035);   // 上下面橫桿
+    for (const z of [-TZ, TZ]) rod([x, H, z], [x, top, z], 0.04);   // 前後面直桿
+    rod([x, H, -TZ], [x, H, TZ], 0.04); rod([x, top, -TZ], [x, top, TZ], 0.04);   // 上下面橫桿
     if (k < nSeg) {
       const xa = x, xb = x + step, xm = x + step / 2;
-      for (const z of [-TZ, TZ]) { rod([xa, top, z], [xm, H, z], 0.032); rod([xm, H, z], [xb, top, z], 0.032); }   // 前後面 V 形
-      rod([xa, top, -TZ], [xb, top, TZ], 0.03); rod([xa, H, TZ], [xb, H, -TZ], 0.03);                              // 上下面斜撐
+      for (const z of [-TZ, TZ]) { rod([xa, top, z], [xm, H, z], 0.035); rod([xm, H, z], [xb, top, z], 0.035); }   // 前後面 V 形
+      rod([xa, top, -TZ], [xb, top, TZ], 0.032); rod([xa, H, TZ], [xb, H, -TZ], 0.032);                              // 上下面斜撐
     }
   }
   return g;
 }
-// ---- 維修走道 (牌面下方)：格柵地板、外側直條欄杆、每 1.5 m 一支托架
+// ---- 維修走道 (牌面下緣前方)：格柵地板、每 1.5 m 一支托架吊在下弦、前緣踢腳板；欄杆只在沒有牌面擋住的地方 (照實景)
 const gridTex = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
   x.clearRect(0, 0, 64, 64); x.fillStyle = '#fff';
@@ -956,28 +955,38 @@ const barTex = (() => {
 })();
 const gratingMat = new T.MeshStandardMaterial({ color: new T.Color(0.6, 0.63, 0.66), metalness: 0.5, roughness: 0.5, alphaMap: gridTex, alphaTest: 0.5, side: T.DoubleSide });
 const railMat = new T.MeshStandardMaterial({ color: new T.Color(0.6, 0.63, 0.66), metalness: 0.5, roughness: 0.5, alphaMap: barTex, alphaTest: 0.5, side: T.DoubleSide });
-function catwalk(g, xa, xb, y, z0, depth = 0.9) {
-  const L = xb - xa;
-  const floor = new T.Mesh(new T.PlaneGeometry(L, depth).rotateX(-Math.PI / 2), gratingMat.clone());
-  floor.material.alphaMap = gridTex.clone(); floor.material.alphaMap.repeat.set(L / 0.6, depth / 0.6); floor.material.alphaMap.needsUpdate = true;
-  floor.position.set((xa + xb) / 2, y, z0 + depth / 2); g.add(floor);
-  const rail = new T.Mesh(new T.PlaneGeometry(L, 1.0), railMat.clone());
-  rail.material.alphaMap = barTex.clone(); rail.material.alphaMap.repeat.set(L / 0.6, 1); rail.material.alphaMap.needsUpdate = true;
-  rail.position.set((xa + xb) / 2, y + 0.5, z0 + depth); g.add(rail);
+/** 貼圖重複寫進 UV (同一個材質就能合併成一個繪製呼叫) */
+function tiledPlane(w, h, ru, rv) { const geo = new T.PlaneGeometry(w, h), uv = geo.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * ru, uv.getY(i) * rv); return geo; }
+function catwalk(g, xa, xb, y, zB, zF, hangY, covered = []) {
+  const L = xb - xa, D = zF - zB, box = (w, h, d, x, yy, z) => { const m = new T.Mesh(new T.BoxGeometry(w, h, d), galvMat); m.position.set(x, yy, z); g.add(m); };
+  const floor = new T.Mesh(tiledPlane(L, D, L / 0.6, D / 0.6).rotateX(-Math.PI / 2), gratingMat); floor.position.set((xa + xb) / 2, y, (zB + zF) / 2); g.add(floor);
   const n = Math.max(2, Math.round(L / 1.5));
   for (let k = 0; k <= n; k++) {
     const x = xa + L * k / n;
-    const br = new T.Mesh(new T.BoxGeometry(0.06, 0.12, depth + 0.15), galvMat); br.position.set(x, y - 0.07, z0 + depth / 2 - 0.05); g.add(br);     // 托架
-    const po = new T.Mesh(new T.BoxGeometry(0.05, 1.0, 0.05), galvMat); po.position.set(x, y + 0.5, z0 + depth); g.add(po);                      // 欄杆柱
+    box(0.07, 0.12, D + 0.12, x, y - 0.07, (zB + zF) / 2);            // 托架
+    if (hangY > y) box(0.07, hangY - y + 0.07, 0.07, x, (hangY + y) / 2 - 0.03, zB);   // 吊到桁架下弦
   }
-  for (const yy of [y + 0.02, y + 1.0]) { const e = new T.Mesh(new T.BoxGeometry(L, 0.05, 0.05), galvMat); e.position.set((xa + xb) / 2, yy, z0 + depth); g.add(e); }
+  box(L, 0.12, 0.05, (xa + xb) / 2, y - 0.06, zF);                     // 前緣槽鋼
+  box(L, 0.1, 0.03, (xa + xb) / 2, y + 0.05, zF);                      // 踢腳板
+  // 欄杆: 只在牌面之間的空隙與兩端
+  const free = []; let cur = xa;
+  for (const [a, b] of covered.slice().sort((p, q) => p[0] - q[0])) { if (a > cur) free.push([cur, Math.min(a, xb)]); cur = Math.max(cur, b); }
+  if (cur < xb) free.push([cur, xb]);
+  for (const [a, b] of free) {
+    const l = b - a; if (l < 0.35) continue;
+    const r = new T.Mesh(tiledPlane(l, 1.0, l / 0.6, 1), railMat); r.position.set((a + b) / 2, y + 0.5, zF); g.add(r);
+    box(l, 0.05, 0.05, (a + b) / 2, y + 1.0, zF);
+    const m = Math.max(1, Math.round(l / 1.5));
+    for (let k = 0; k <= m; k++) box(0.05, 1.0, 0.05, a + l * k / m, y + 0.5, zF);
+  }
 }
-/** 牌面背後: 灰色背板 + 橫向加強肋 (每 0.3 m) + 兩支垂直吊桿接到桁架 */
+/** 牌面背後: 灰色背板 + 橫向加強肋 (每 0.3 m) + 垂直吊桿 (每 1.4 m 一支) 從走道接到桁架上弦 */
 const ribMat = new T.MeshStandardMaterial({ color: new T.Color(0.5, 0.52, 0.55), metalness: 0.6, roughness: 0.45 });
-function signBack(g, cx, cy, w, h, z, Htop) {
+function signBack(g, cx, cy, w, h, z, yLo, yHi) {
   const b = new T.Mesh(new T.BoxGeometry(w, h, 0.04), ribMat); b.position.set(cx, cy, z - 0.03); g.add(b);
   for (let y = -h / 2 + 0.15; y < h / 2 - 0.05; y += 0.3) { const r = new T.Mesh(new T.BoxGeometry(w - 0.06, 0.06, 0.05), ribMat); r.position.set(cx, cy + y, z - 0.075); g.add(r); }
-  for (const sx of [-w * 0.3, w * 0.3]) { const v = new T.Mesh(new T.BoxGeometry(0.08, Math.max(h, Htop - (cy - h / 2)) + 0.2, 0.08), galvMat); v.position.set(cx + sx, (cy - h / 2 + Math.max(cy + h / 2, Htop)) / 2, z - 0.14); g.add(v); }
+  const lo = Math.min(yLo, cy - h / 2) - 0.05, hi = Math.max(yHi, cy + h / 2) + 0.1, nh = Math.max(2, Math.round(w / 1.4));
+  for (let j = 0; j < nh; j++) { const v = new T.Mesh(new T.BoxGeometry(0.1, hi - lo, 0.1), galvMat); v.position.set(cx - w / 2 + w * (j + 0.5) / nh, (lo + hi) / 2, z - 0.16); g.add(v); }
 }
 function placeOnWay(obj, w, i) {
   const x = w.P[i * 3], y = w.P[i * 3 + 1], z = w.P[i * 3 + 2];
@@ -1099,7 +1108,8 @@ function buildEtc(g) {
 // ======================================================================= 交流道出口指示牌 (照實景: 綠底白字門架)
 // 資料: scripts/build_signs.py -> extra-signs。左邊直行 (下兩個交流道 + ↑)，右邊出口 (路線盾牌、地名、英文 + ↗)，出口牌上方黃底出口編號
 const GUIDES = (() => { const el = $('extra-signs'); try { return el ? JSON.parse(el.textContent) : []; } catch (e) { return []; } })().map((g) => ({ ...g, model: null }));
-const SGN = { green: '#0a6b3b', px: 96, zh: 0.85, en: 0.31, sh: 0.78, arrow: 0.75, pad: 0.38, gap: 0.65 };
+// 實景量測: 單一地名牌約 3.5 m 寬 × 2.6 m 高 (橫長方形)，中文字高約 0.7 m
+const SGN = { green: '#0a6b3b', px: 96, zh: 0.72, en: 0.28, sh: 0.7, arrow: 0.62, pad: 0.34, gap: 0.6, minW: 3.5, minH: 2.6 };
 const ZH_FONT = '"Microsoft JhengHei","PingFang TC","Noto Sans TC","Noto Sans CJK TC","Heiti TC",sans-serif';
 const EN_FONT = 'Arial,"Helvetica Neue",sans-serif';
 const zhFont = (m) => '700 ' + Math.round(m * SGN.px) + 'px ' + ZH_FONT;
@@ -1175,45 +1185,48 @@ function panelBase(wM, hM, bg = SGN.green, border = '#ffffff') {
 }
 const ZH_SP = 0.2;   // 中文字距 (m)
 /** 出口牌: 每個目的地一欄 (盾牌 / 中文 / 英文)，欄間白色分隔線，箭頭在出口那一側的下方 */
+/** 中文字距: 照實景，兩個字的地名字距很寬 (約一個字)，字越多越緊 */
+const zsp = (t, multi) => { const n = [...t].length, v = n <= 2 ? 0.7 : n === 3 ? 0.4 : 0.2; return multi ? Math.min(v, 0.35) : v; };
 function exitPanel(gd) {
-  const S = SGN, n = gd.dz.length, perCol = gd.shields.length === n;
+  const S = SGN, n = gd.dz.length, perCol = gd.shields.length === n, multi = n > 1;
   const cols = gd.dz.map((zh, i) => {
-    const zw = textW(zh, zhFont(S.zh), ZH_SP), ew = gd.den[i] ? textW(gd.den[i], enFont(S.en)) : 0;
+    const zw = textW(zh, zhFont(S.zh), zsp(zh, multi)), ew = gd.den[i] ? textW(gd.den[i], enFont(S.en)) : 0;
     const sw = perCol ? shieldW(gd.shields[i]) : 0;
-    return { zh, en: gd.den[i] || '', sh: perCol ? gd.shields[i] : null, w: Math.max(zw, ew, sw, 1.0) };
+    return { zh, en: gd.den[i] || '', sh: perCol ? gd.shields[i] : null, w: Math.max(zw, ew, sw, 1.4) };
   });
   const groupSh = !perCol && gd.shields.length ? gd.shields : null;
   const hasSh = perCol || !!groupSh;
-  const W = S.pad * 2 + cols.reduce((a, c) => a + c.w, 0) + S.gap * (n - 1) + (n === 1 ? 0.6 : 0);
-  const H = S.pad + (hasSh ? S.sh + 0.12 : 0) + S.zh + 0.1 + S.en + 0.16 + S.arrow + S.pad * 0.7;
+  const W = Math.max(S.minW + 0.2, S.pad * 2 + cols.reduce((a, c) => a + c.w, 0) + S.gap * (n - 1) + (n === 1 ? 0.6 : 0));
+  const Hc = S.pad + (hasSh ? S.sh + 0.12 : 0) + S.zh + 0.12 + S.en + 0.2 + S.arrow + S.pad * 0.7, H = Math.max(S.minH, Hc), oy = (H - Hc) * 0.45;
   const p = panelBase(W, H), x = p.x, P = S.px;
-  let cx = S.pad + (n === 1 ? 0.3 : 0);
-  const yZh = (S.pad + (hasSh ? S.sh + 0.12 : 0) + S.zh * 0.9) * P, yEn = yZh + (0.1 + S.en) * P;
+  const used = cols.reduce((a, c) => a + c.w, 0) + S.gap * (n - 1);
+  let cx = (W - used) / 2;
+  const yZh = (oy + S.pad + (hasSh ? S.sh + 0.12 : 0) + S.zh * 0.9) * P, yEn = yZh + (0.12 + S.en) * P;
   cols.forEach((c, i) => {
     const mid = (cx + c.w / 2) * P;
-    if (c.sh) drawShield(x, c.sh, mid, S.pad * P);
+    if (c.sh) drawShield(x, c.sh, mid, (oy + S.pad) * P);
     x.fillStyle = '#ffffff';
-    x.font = zhFont(S.zh); drawSpaced(x, c.zh, mid, yZh, ZH_SP);
+    x.font = zhFont(S.zh); drawSpaced(x, c.zh, mid, yZh, zsp(c.zh, multi));
     if (c.en) { x.font = enFont(S.en); x.fillText(c.en, mid, yEn); }
-    if (i < n - 1) { x.fillStyle = '#ffffff'; x.fillRect((cx + c.w + S.gap / 2) * P - 0.025 * P, (S.pad + (hasSh ? S.sh * 0.5 : 0)) * P, 0.05 * P, (S.zh + S.en + 0.25) * P); }
+    if (i < n - 1) { x.fillStyle = '#ffffff'; x.fillRect((cx + c.w + S.gap / 2) * P - 0.025 * P, (oy + S.pad + (hasSh ? S.sh * 0.5 : 0)) * P, 0.05 * P, (S.zh + S.en + 0.3) * P); }
     cx += c.w + S.gap;
   });
   if (groupSh) {
     let tw = groupSh.reduce((a, r) => a + shieldW(r) + 0.15, -0.15), sx = (W - tw) / 2;
-    for (const r of groupSh) { drawShield(x, r, (sx + shieldW(r) / 2) * P, S.pad * P); sx += shieldW(r) + 0.15; }
+    for (const r of groupSh) { drawShield(x, r, (sx + shieldW(r) / 2) * P, (oy + S.pad) * P); sx += shieldW(r) + 0.15; }
   }
   const ay = H - S.pad * 0.7 - S.arrow / 2, R = gd.side !== 'L';
-  drawArrow(x, (R ? W - S.pad - 0.5 : S.pad + 0.5) * P, ay * P, S.arrow, R ? Math.PI / 4 : -Math.PI / 4);
+  drawArrow(x, (n === 1 ? W / 2 + (R ? 1 : -1) * 0.9 : (R ? W - S.pad - 0.5 : S.pad + 0.5)) * P, ay * P, S.arrow, R ? Math.PI / 4 : -Math.PI / 4);
   return p;
 }
 function thruPanel([zh, en]) {
   const S = SGN;
-  const W = S.pad * 2 + Math.max(textW(zh, zhFont(S.zh), ZH_SP), en ? textW(en, enFont(S.en)) : 0, 1.2);
-  const H = S.pad + S.zh + 0.1 + S.en + 0.16 + S.arrow + S.pad * 0.7;
+  const W = Math.max(S.minW, S.pad * 2 + Math.max(textW(zh, zhFont(S.zh), zsp(zh)), en ? textW(en, enFont(S.en)) : 0));
+  const Hc = S.pad + S.zh + 0.12 + S.en + 0.2 + S.arrow + S.pad * 0.7, H = Math.max(S.minH, Hc), oy = (H - Hc) * 0.45;
   const p = panelBase(W, H), x = p.x, P = S.px;
-  const yZh = (S.pad + S.zh * 0.9) * P;
-  x.fillStyle = '#ffffff'; x.font = zhFont(S.zh); drawSpaced(x, zh, W / 2 * P, yZh, ZH_SP);
-  if (en) { x.font = enFont(S.en); x.fillText(en, W / 2 * P, yZh + (0.1 + S.en) * P); }
+  const yZh = (oy + S.pad + S.zh * 0.9) * P;
+  x.fillStyle = '#ffffff'; x.font = zhFont(S.zh); drawSpaced(x, zh, W / 2 * P, yZh, zsp(zh));
+  if (en) { x.font = enFont(S.en); x.fillText(en, W / 2 * P, yZh + (0.12 + S.en) * P); }
   drawArrow(x, W / 2 * P, (H - S.pad * 0.7 - S.arrow / 2) * P, S.arrow, 0);
   return p;
 }
@@ -1232,30 +1245,36 @@ function signMat(cv) {
 }
 const backMat = new T.MeshStandardMaterial({ color: new T.Color(0.42, 0.44, 0.46), metalness: 0.6, roughness: 0.5 });
 function buildGuide(gd) {
-  const w = TW.wayByGid(gd.gid), hw = w.hw;
-  // 立柱立在中央護欄與外側護欄上 (護欄中心)
-  const XL = -TW.leftPost(w, gd.idx), XR = TW.rightEdge(w, gd.idx) - TW.BARRIER_INSET, H = 6.4, TH = 1.6;
-  const root = new T.Group(), steel = trussGroup(XL, XR, H, TH);
-  catwalk(steel, XL + 0.5, XR - 0.5, H - 0.55, 0.5);
-  const ex = exitPanel(gd), th = gd.thru.map(thruPanel), tab = gd.ref ? exitTab(gd) : null;
-  const avail = XR - XL - 1.2;   // 兩根立柱之間 (含路肩上方)
-  const total = ex.w + th.reduce((a, p) => a + p.w + 0.5, 0);
-  const k = Math.min(1, avail / total);
-  const yB = H - 0.45, Z = 0.72, R = gd.side !== 'L';   // 牌面下緣在走道上方、掛在桁架前面
-  const put = (p, cx, y0) => {
-    const m = new T.Mesh(new T.PlaneGeometry(p.w * k, p.h * k), signMat(p.cv));
-    m.position.set(cx, y0 + p.h * k / 2, Z); root.add(m);
-    signBack(steel, cx, y0 + p.h * k / 2, p.w * k, p.h * k, Z, H + TH);
+  const w = TW.wayByGid(gd.gid);
+  // 立柱立在中央護欄與外側護欄上 (護欄中心)；照實景: 牌面下緣約 5.8 m、桁架高 2.3 m 藏在牌面後面、柱距 (沿路) 1.4 m
+  const XL = -TW.leftPost(w, gd.idx), XR = TW.rightEdge(w, gd.idx) - TW.BARRIER_INSET, H = 5.95, TH = 2.3, TZ = 0.7;
+  const root = new T.Group(), steel = trussGroup(XL, XR, H, TH, 0.87, TZ);
+  const ex = exitPanel(gd), th = gd.thru.map(thruPanel), tab = gd.ref ? exitTab(gd) : null, R = gd.side !== 'L';
+  // ---- 牌面對準車道: 出口牌在出口那一側最外車道正上方，直行牌平均排在其餘車道上方
+  const nL = Math.max(1, w.lanes), ls = w.ls || 0, laneX = (f) => LANE_W * (f + 0.5) - w.hw + ls;   // 車道 f (0 = 最左) 中心的本地 x
+  const m = th.length, rest = Math.max(1, nL - 1);
+  const thruX = (j) => { const f = (j + 0.5) * rest / Math.max(1, m) - 0.5; return laneX(R ? f : f + 1); };
+  const list = th.map((p, j) => ({ p, c: thruX(j) }));
+  const exItem = { p: ex, c: laneX(R ? nL - 1 : 0) };
+  const items = R ? [...list, exItem] : [exItem, ...list];   // 左到右
+  const lo = XL + 0.55, hi = XR - 0.55, gap = 0.35;
+  const s = Math.min(1, (hi - lo - gap * (items.length - 1)) / items.reduce((a, it) => a + it.p.w, 0));
+  for (const it of items) { it.w = it.p.w * s; it.h = it.p.h * s; it.l = it.c - it.w / 2; }
+  for (let i = 0; i < items.length; i++) items[i].l = Math.max(items[i].l, i ? items[i - 1].l + items[i - 1].w + gap : lo);
+  for (let i = items.length - 1; i >= 0; i--) items[i].l = Math.min(items[i].l, (i < items.length - 1 ? items[i + 1].l - gap : hi) - items[i].w);
+  for (let i = 0; i < items.length; i++) items[i].l = Math.max(items[i].l, i ? items[i - 1].l + items[i - 1].w + gap : lo);
+  const yB = H - 0.15, Z = TZ + 0.26;   // 牌面下緣、牌面位置 (掛在桁架前面)
+  const put = (p, cx, y0, pw, ph) => {
+    const mesh = new T.Mesh(new T.PlaneGeometry(pw, ph), signMat(p.cv));
+    mesh.position.set(cx, y0 + ph / 2, Z); root.add(mesh);
+    signBack(steel, cx, y0 + ph / 2, pw, ph, Z, yB - 0.1, H + TH);
   };
-  const exCx = R ? XR - 0.6 - ex.w * k / 2 : XL + 0.6 + ex.w * k / 2;
-  put(ex, exCx, yB);
-  if (tab) put(tab, R ? exCx + ex.w * k / 2 - tab.w * k / 2 : exCx - ex.w * k / 2 + tab.w * k / 2, yB + ex.h * k + 0.04);
-  let cur = R ? XL + 0.6 : XR - 0.6;
-  for (const p of (R ? th : th.slice().reverse())) {
-    const cx = R ? cur + p.w * k / 2 : cur - p.w * k / 2;
-    put(p, cx, yB);   // 下緣對齊 (照實景)
-    cur += (R ? 1 : -1) * (p.w + 0.5) * k;
+  for (const it of items) put(it.p, it.l + it.w / 2, yB, it.w, it.h);   // 下緣對齊 (照實景)
+  if (tab) {
+    const tw = tab.w * s, thh = tab.h * s, e = exItem;
+    put(tab, R ? e.l + e.w - tw / 2 : e.l + tw / 2, yB + e.h + 0.06, tw, thh);
   }
+  catwalk(steel, XL + 0.35, XR - 0.35, yB - 0.1, TZ, Z + 0.85, H, items.map((it) => [it.l - 0.05, it.l + it.w + 0.05]));
   root.add(mergedGroup(steel));
   placeOnWay(root, w, gd.idx);
   TW.scene.add(root);

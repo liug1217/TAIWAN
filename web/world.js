@@ -12,7 +12,7 @@
 const { T, params, setStatus, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16, WAYS, PT_INDEX, ptKey, CELL, GRID, cellKey,
   ingestDetail, roadAt, TERR, LCLS, landcoverAt, terrainAt, cityAt, HOOKS, BARRIER_INSET, setupShoulders, rightEdge } = TW;
 const { renderer, MOBILE, scene, GLOW_LAMP, patch, TERRAIN_SPEC,
-  matLampPole, matSoundWall, matSoundGlass, matBillboard, matBillboardBack, matLampHead, matAsphalt, matConcrete, matBarrier, matGore,
+  matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, matAsphalt, matConcrete, matBarrier, matGore,
   matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber,
   matReflBlack, matRetro, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, matWater, matTerrain } = TW;
 const S = () => TW.S;   // 玩家狀態 (drive.js 建立)
@@ -82,10 +82,10 @@ const R_PROP = MOBILE ? 800 : 1400, R_FINE = MOBILE ? 200 : 350, R_LAMP = MOBILE
 const CATS = {
   road: ['road', () => matAsphalt, 0, 1, 'base'], city: ['road', () => matCityRoad, 0, 1, 'mid'], skirt: ['', () => matConcrete, 0, 1, 'base'],
   barrier: ['uv', () => matBarrier, 0, 1, 'base'], pier: ['', () => matConcrete, 0, 1, 'base'], gore: ['road', () => matGore, 0, 1, 'base'],
-  tunnel: ['uv', () => matTunnelWall, 0, 1, 'base'], swall: ['', () => matSoundWall, 0, 1, 'mid'], sglass: ['', () => matSoundGlass, 0, 0, 'mid'],
+  tunnel: ['uv', () => matTunnelWall, 0, 1, 'base'], swall: ['', () => matSoundWall, 0, 1, 'mid'], supper: ['', () => matSoundUpper, 0, 1, 'mid'],
   bboard: ['uv', () => matBillboard, 0, 1, 'mid'], bback: ['', () => matBillboardBack, 0, 1, 'mid'], bpole: ['', () => matLampPole, 0, 1, 'mid'],
   glare: ['', () => matGlare, 1, 1, 'prop'], gpost: ['', () => matPost, 1, 1, 'prop'], gband: ['', () => matPostBand, 0, 1, 'prop'],
-  drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matLampPole, 1, 1, 'prop'],
+  drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matSoundPost, 1, 1, 'prop'],
   tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
   lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
   tcab: ['', () => matCabinet, 0, 1, 'fine'], reflBlack: ['', () => matReflBlack, 0, 1, 'fine'], reflFace: ['uv', () => matRetro, 0, 0, 'fine'],
@@ -139,7 +139,7 @@ function along(w, d, k0 = 0) {
   return { k, x: P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, y: P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t, z: P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t };
 }
 
-/** 國道外側路邊設施: 市區段的隔音牆 (下半實心、上半壓克力、4 m 一根柱子) 與約每 1.2 km 一面廣告看板 */
+/** 國道外側路邊設施: 市區段的隔音牆 (實心綠色板、下段深綠上段淺綠、4 m 一根柱子) 與約每 1.2 km 一面廣告看板 */
 function roadside(B, w, oAt, inward) {
   const { nx, ny, hw, M } = w, L = w.len;
   if (L < 30) return;
@@ -160,8 +160,8 @@ function roadside(B, w, oAt, inward) {
     const p = along(w, d, k); k = p.k; if ((M[p.k] | M[p.k + 1]) & 2) continue;
     const tx = ny[p.k], ty = -nx[p.k], ox = nx[p.k] * out, oy = ny[p.k] * out;
     const o = oAt(p.k), cx = p.x + nx[p.k] * o + ox * 0.18, cy = p.y + ny[p.k] * o + oy * 0.18;
-    box(B.g('swall', cx, cy), cx, cy, tx, ty, 2.0, 0.07, p.z + 0.86, p.z + 2.3);
-    box(B.g('sglass', cx, cy), cx, cy, tx, ty, 1.97, 0.03, p.z + 2.3, p.z + 4.2);
+    box(B.g('swall', cx, cy), cx, cy, tx, ty, 2.0, 0.07, p.z + 0.86, p.z + 1.75);
+    box(B.g('supper', cx, cy), cx, cy, tx, ty, 2.0, 0.07, p.z + 1.75, p.z + 4.2);
     const sp = B.g('spost', cx, cy);
     box(sp, cx - tx * 2, cy - ty * 2, tx, ty, 0.09, 0.11, p.z + 0.86, p.z + 4.35);
     box(sp, cx, cy, tx, ty, 2.0, 0.05, p.z + 4.2, p.z + 4.32);   // 頂部壓條
