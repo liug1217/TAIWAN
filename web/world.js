@@ -131,14 +131,60 @@ Strip.next = 0;
 // 混凝土護欄斷面 (照街景: 底部小斜趾、上半近乎垂直、平頂)；[橫向 m, 高 m]
 const BARRIER = [[-0.32, 0], [-0.3, 0.07], [-0.2, 0.16], [-0.11, 0.84], [-0.08, 0.87], [0.08, 0.87], [0.11, 0.84], [0.2, 0.16], [0.3, 0.07], [0.32, 0]];
 const BAR_PAIRS = BARRIER.slice(0, -1).map((_, j) => [j * 2, j * 2 + 1]);
+/** 門架 (指示牌 / CMS / ETC) 位置: gid -> [節點 idx]。照實景，門架立柱那一段中央護欄會降低 (BAR_LOW) */
+const BAR_LOW = 0.62, BAR_NOTCH = 2.0, BAR_RAMP = 0.02;   // 直接降一階 (不做斜坡)
+let GANTRY_SPOTS = null;
+function gantrySpots(gid) {
+  if (!GANTRY_SPOTS) {
+    GANTRY_SPOTS = new Map();
+    const add = (g, i) => { if (g == null || i == null) return; if (!GANTRY_SPOTS.has(g)) GANTRY_SPOTS.set(g, []); GANTRY_SPOTS.get(g).push(i); };
+    const read = (id) => { try { const el = document.getElementById(id); return el ? JSON.parse(el.textContent) : null; } catch (e) { return null; } };
+    const live = read('extra-live'), guides = read('extra-signs');
+    if (live) { for (const c of live.cms || []) if ((c.pages || []).length) add(c.way, c.idx); if (!params.has('noetc')) for (const e of live.etc || []) add(e.way, e.idx); }
+    if (guides) for (const g of guides) add(g.gid, g.idx);
+  }
+  return GANTRY_SPOTS.get(gid) || [];
+}
+/** 這條路左側 (中央) 護欄上的門架位置 (沿線距離)。共用的中央護欄也要算對向那條路的門架 */
+function barrierNotches(w) {
+  const out = [], { P, s, n } = w;
+  for (const i of gantrySpots(w.gid)) if (i < n) out.push(s[i]);
+  if (w.oppL) {
+    const opp = new Set(); for (const o of w.oppL) if (o) opp.add(o);
+    for (const o of opp) for (const i of gantrySpots(o.gid)) {
+      if (i >= o.n) continue;
+      const x = o.P[i * 3], y = o.P[i * 3 + 1];
+      let best = 40, bd = -1;
+      for (let k = 0; k < n - 1; k++) {
+        const ax = P[k * 3], ay = P[k * 3 + 1], dx = P[k * 3 + 3] - ax, dy = P[k * 3 + 4] - ay, L2 = dx * dx + dy * dy || 1;
+        const t = Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / L2)), d = Math.hypot(ax + dx * t - x, ay + dy * t - y);
+        if (d < best) { best = d; bd = s[k] + (s[k + 1] - s[k]) * t; }
+      }
+      if (bd >= 0) out.push(bd);
+    }
+  }
+  return out;
+}
 /** 沿線距離 d 處的點: { k 線段, x, y, z } */
 function along(w, d, k0 = 0) {
   const { P, s, n } = w;
   let k = k0; while (k < n - 2 && s[k + 1] < d) k++;
   const t = Math.min(1, Math.max(0, (d - s[k]) / ((s[k + 1] - s[k]) || 1)));
-  return { k, x: P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, y: P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t, z: P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t };
+  return { k, t, x: P[k * 3] + (P[k * 3 + 3] - P[k * 3]) * t, y: P[k * 3 + 1] + (P[k * 3 + 4] - P[k * 3 + 1]) * t, z: P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t };
 }
 
+/** 沿路某點的護欄中心 (世界座標): 跟護欄網格一樣用兩個節點的「節點位置 + 節點法向 × 偏移」內插
+ *  (舊做法用左節點的偏移和法向，在路肩加寬漸變段與彎道上物件會離開護欄) */
+const OBJ_DEV = { n: 0, bad: 0, max: 0 }, OBJ_CHECK = params.has('objcheck');
+if (OBJ_CHECK) setInterval(() => console.log('[test] objcheck ' + JSON.stringify(OBJ_DEV) + ' joints ' + JSON.stringify(JSTAT)), 15000);
+const JSTAT = { placed: 0, dup: 0 };
+function oPt(w, oAt, p) {
+  const { P, nx, ny, n } = w, k = p.k, k1 = Math.min(k + 1, n - 1), t = p.t || 0, a = oAt(k), b = oAt(k1);
+  const x0 = P[k * 3] + nx[k] * a, y0 = P[k * 3 + 1] + ny[k] * a, x1 = P[k1 * 3] + nx[k1] * b, y1 = P[k1 * 3 + 1] + ny[k1] * b;
+  const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
+  if (OBJ_CHECK) { const d = Math.hypot(x - (p.x + nx[k] * a), y - (p.y + ny[k] * a)); OBJ_DEV.n++; if (d > 0.05) OBJ_DEV.bad++; if (d > OBJ_DEV.max) OBJ_DEV.max = d; }
+  return { x, y };
+}
 /** 國道外側路邊設施: 市區段的隔音牆 (實心綠色板、下段深綠上段淺綠、4 m 一根柱子) 與約每 1.2 km 一面廣告看板 */
 function roadside(B, w, oAt, inward) {
   const { nx, ny, hw, M } = w, L = w.len;
@@ -159,11 +205,13 @@ function roadside(B, w, oAt, inward) {
     if (!wall[Math.min(ns - 1, Math.round(d / step))]) continue;
     const p = along(w, d, k); k = p.k; if ((M[p.k] | M[p.k + 1]) & 2) continue;
     const tx = ny[p.k], ty = -nx[p.k], ox = nx[p.k] * out, oy = ny[p.k] * out;
-    const o = oAt(p.k), cx = p.x + nx[p.k] * o + ox * 0.18, cy = p.y + ny[p.k] * o + oy * 0.18;
-    box(B.g('swall', cx, cy), cx, cy, tx, ty, 2.0, 0.07, p.z + 0.86, p.z + 1.75);
-    box(B.g('supper', cx, cy), cx, cy, tx, ty, 2.0, 0.07, p.z + 1.75, p.z + 4.2);
+    // 照實景: 一般路段隔音牆立在護欄外約 1.4 m 的地上 (門架外側立柱就站在護欄與隔音牆之間)；橋上沒有地，立在護欄頂上
+    const onGround = !w.bridge, off = onGround ? 1.45 : 0.18, z0 = onGround ? p.z - 3 : p.z + 0.86, zb = onGround ? p.z + 0.9 : p.z + 1.75;
+    const q = oPt(w, oAt, p), cx = q.x + ox * off, cy = q.y + oy * off;
+    box(B.g('swall', cx, cy), cx, cy, tx, ty, 2.0, 0.07, z0, zb);
+    box(B.g('supper', cx, cy), cx, cy, tx, ty, 2.0, 0.07, zb, p.z + 4.2);
     const sp = B.g('spost', cx, cy);
-    box(sp, cx - tx * 2, cy - ty * 2, tx, ty, 0.09, 0.11, p.z + 0.86, p.z + 4.35);
+    box(sp, cx - tx * 2, cy - ty * 2, tx, ty, 0.09, 0.11, z0, p.z + 4.35);
     box(sp, cx, cy, tx, ty, 2.0, 0.05, p.z + 4.2, p.z + 4.32);   // 頂部壓條
   }
   // 廣告看板: 市區段約每 1.2 km 一面 (位置由 gid 決定)，立在護欄外 9 m，面向來車並往路內轉 18°
@@ -172,7 +220,7 @@ function roadside(B, w, oAt, inward) {
     if (!urb[Math.min(ns - 1, Math.round(d / step))]) continue;
     const p = along(w, d); if ((M[p.k] | M[p.k + 1]) & 2) continue;
     const tx = ny[p.k], ty = -nx[p.k], ox = nx[p.k] * out, oy = ny[p.k] * out;
-    const o = oAt(p.k), bx = p.x + nx[p.k] * o + ox * 9, by = p.y + ny[p.k] * o + oy * 9;
+    const q = oPt(w, oAt, p), bx = q.x + ox * 9, by = q.y + oy * 9;
     const gz = terrainAt(bx, by), base = Math.min(gz, p.z), top = p.z + 13, bot = top - 4.2;
     if (p.z - gz > 25) continue;   // 高架很高的地方不放
     box(B.g('bpole', bx, by), bx, by, tx, ty, 0.35, 0.35, base - 0.5, bot + 0.5);
@@ -236,24 +284,46 @@ function addRoad(B, w) {
     // 共用的中央護欄 (左邊有對向路面) 只由 gid 小的那一條建
     const notMine = (i) => bit === 1 && PR(i) && w.oppL[i] && w.oppL[i].gid < w.gid;
     const bar = new Strip(B, 'barrier', BAR_PAIRS);
-    for (let i = 0; i < n; i++) {
-      const oi = oAt(i), cx = P[i * 3] + nx[i] * oi, cy = P[i * 3 + 1] + ny[i] * oi, cz = P[i * 3 + 2], verts = [];
-      for (let j = 0; j < BARRIER.length - 1; j++) for (const [a, h] of [BARRIER[j], BARRIER[j + 1]]) verts.push([cx + nx[i] * a, cy + ny[i] * a, cz + h - 0.03, s[i], h]);
-      bar.add(verts, i > 0 && !((M[i - 1] | M[i]) & bit) && !(notMine(i - 1) && notMine(i)));
+    // 斷面位置: 每個節點 + 門架降低段的前後 (降低段 ±BAR_NOTCH，兩端 BAR_RAMP 斜坡)
+    const notch = bit === 1 ? barrierNotches(w) : [], LF = BAR_LOW / 0.87;
+    const hf = (d) => { let f = 1; for (const c of notch) { const e = Math.abs(d - c); if (e < BAR_NOTCH + BAR_RAMP) f = Math.min(f, e <= BAR_NOTCH ? LF : LF + (1 - LF) * (e - BAR_NOTCH) / BAR_RAMP); } return f; };
+    const st = [];
+    for (let i = 0; i < n; i++) st.push([s[i], i]);
+    for (const c of notch) for (const dd of [-BAR_NOTCH - BAR_RAMP, -BAR_NOTCH, BAR_NOTCH, BAR_NOTCH + BAR_RAMP]) { const d = c + dd; if (d > 0.05 && d < s[n - 1] - 0.05) st.push([d, -1]); }
+    st.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+    const segOk = (k) => !((M[k] | M[k + 1]) & bit) && !(notMine(k) && notMine(k + 1));
+    let k = 0;
+    for (let q = 0; q < st.length; q++) {
+      const [d, node] = st[q];
+      while (k < n - 2 && s[k + 1] < d) k++;
+      let cx, cy, cz, nnx, nny, ok;
+      if (node >= 0) { const oi = oAt(node); nnx = nx[node]; nny = ny[node]; cx = P[node * 3] + nnx * oi; cy = P[node * 3 + 1] + nny * oi; cz = P[node * 3 + 2]; ok = node > 0 && segOk(node - 1); }
+      else {
+        const t = Math.min(1, Math.max(0, (d - s[k]) / ((s[k + 1] - s[k]) || 1))), a = oAt(k), b = oAt(k + 1);
+        nnx = nx[k] + (nx[k + 1] - nx[k]) * t; nny = ny[k] + (ny[k + 1] - ny[k]) * t; const nl = Math.hypot(nnx, nny) || 1; nnx /= nl; nny /= nl;
+        cx = P[k * 3] + nx[k] * a + (P[k * 3 + 3] + nx[k + 1] * b - P[k * 3] - nx[k] * a) * t;
+        cy = P[k * 3 + 1] + ny[k] * a + (P[k * 3 + 4] + ny[k + 1] * b - P[k * 3 + 1] - ny[k] * a) * t;
+        cz = P[k * 3 + 2] + (P[k * 3 + 5] - P[k * 3 + 2]) * t; ok = q > 0 && segOk(k);
+      }
+      const f = notch.length ? hf(d) : 1, verts = [];
+      for (let j = 0; j < BARRIER.length - 1; j++) for (const [a, h] of [BARRIER[j], BARRIER[j + 1]]) verts.push([cx + nnx * a, cy + nny * a, cz + h * f - 0.03, d, h * f]);
+      bar.add(verts, ok);
     }
+    const nearNotch = (d, r) => notch.some((c) => Math.abs(d - c) < r);
     // 防眩板: 中央分隔護欄頂上每 4 m 一片，板面幾乎垂直路線 (擋對向車燈、側面看得穿)
     if (bit === 1 && !w.link && w.oneway && !params.has('noglare')) {
       let skip = false;
       for (let d = 2, k = 0; d < s[n - 1]; d += 4) {
         const p = along(w, d, k); k = p.k;
         if ((M[k] | M[k + 1]) & bit) continue;
+        if (nearNotch(d, BAR_NOTCH + BAR_RAMP + 0.3)) continue;   // 門架立柱那一段沒有防眩板
         if (w.bc) skip = notMine(k);
         else if (((d - 2) / 4) % 10 === 0) {   // 快速道路: 每 40 m 看一次旁邊是不是緊貼著對向路面
           const pr = roadAt(p.x + nx[k] * (hw + 1.6), p.y + ny[k] * (hw + 1.6), p.z, 0, 1.5);
           skip = !!(pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - p.z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid);
         }
         if (skip) continue;
-        const ok = oAt(k), x = p.x + nx[k] * ok, y = p.y + ny[k] * ok, a = 0.21;   // 板面轉 12°
+        const q = oPt(w, oAt, p), x = q.x, y = q.y, a = 0.21;   // 板面轉 12°
         const tx = ny[k] * Math.cos(a) + nx[k] * Math.sin(a), ty = -nx[k] * Math.cos(a) + ny[k] * Math.sin(a), g = B.g('glare', x, y);
         box(g, x, y, tx, ty, 0.022, 0.12, p.z + 0.84, p.z + 1.55);
         box(g, x, y, ny[k], -nx[k], 0.03, 0.03, p.z + 0.8, p.z + 0.9);   // 底座
@@ -266,12 +336,13 @@ function addRoad(B, w) {
       for (let d = 2, k = 0; d < s[n - 1]; d += 40) {
         const p = along(w, d, k); k = p.k;
         if ((M[k] | M[k + 1]) & bit) continue;
+        if (nearNotch(d, 3.5)) continue;   // 跟門架立柱撞在一起
         if (w.bc) { if (notMine(k)) continue; }
         else {
           const pr = roadAt(p.x + nx[k] * (hw + 1.6), p.y + ny[k] * (hw + 1.6), p.z, 0, 1.5);
           if (pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - p.z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid) continue;
         }
-        const ok = oAt(k), x = p.x + nx[k] * ok, y = p.y + ny[k] * ok, z = p.z;
+        const q = oPt(w, oAt, p), x = q.x, y = q.y, z = p.z;
         const lp = B.g('lampPole', x, y), lh = B.g('lampHead', x, y);
         box(lp, x, y, ny[k], -nx[k], 0.09, 0.09, z + 0.85, z + 10.5);
         box(lp, x, y, ny[k], -nx[k], 0.05, 2.0, z + 10.3, z + 10.42);
@@ -286,8 +357,8 @@ function addRoad(B, w) {
     if (bit === 2) for (let d = 12, k = 0; d < s[n - 1]; d += 24) {
       const p = along(w, d, k); k = p.k;
       if ((M[k] | M[k + 1]) & bit) continue;
-      const ok = oAt(k);
-      addReflector(B, p.x + nx[k] * ok, p.y + ny[k] * ok, p.z + 0.87, ny[k], -nx[k]);
+      const q = oPt(w, oAt, p);
+      addReflector(B, q.x, q.y, p.z + 0.87, ny[k], -nx[k]);
     }
   }
   if (w.tunnel) addTunnel(B, w);
@@ -378,10 +449,25 @@ function jointOn(w, i, x, y) {
 /** 分區的伸縮縫 (需要鄰區資料)。同一座橋墩撐兩個方向的橋面時，每條各一道 */
 function computeJoints(rec) {
   const out = [];
+  // 已經有一道幾乎重疊的伸縮縫 (同方向、前後 5 m 內、左右範圍有重疊) 就不再放：
+  // 兩方向橋墩錯開幾公尺、匝道疊在主線上、橋頭剛好有橋墩，都會讓同一處出現兩道
+  const dup = (j) => {
+    const nx = -j.ty, ny = j.tx;
+    for (const o of JGRID.get(Math.floor(j.x / JCELL) * 100003 + Math.floor(j.y / JCELL)) || []) {
+      if (Math.abs(o.z - j.z) > 1.5) continue;
+      const dt = o.tx * j.tx + o.ty * j.ty; if (Math.abs(dt) < 0.9) continue;
+      if (Math.abs((o.x - j.x) * j.tx + (o.y - j.y) * j.ty) > 5) continue;
+      const c = (o.x - j.x) * nx + (o.y - j.y) * ny, lo = c - (dt > 0 ? o.hR : o.hL), hi = c + (dt > 0 ? o.hL : o.hR);
+      if (Math.min(j.hL, hi) - Math.max(-j.hR, lo) > 0.5) return true;
+    }
+    return false;
+  };
   const mk = (j) => {
     const key = j.k + ':' + Math.round(j.x) + ',' + Math.round(j.y);
     if (JSEEN.has(key)) return;
-    JSEEN.add(key); out.push(j); addJoint(j);
+    JSEEN.add(key);
+    if (dup(j)) { JSTAT.dup++; return; }
+    JSTAT.placed++; out.push(j); addJoint(j);
   };
   const A = rec.piers;
   for (let k = 0; k < A.length / 9; k++) {   // 橋墩上方: 帽梁上的每一條橋面
@@ -397,10 +483,16 @@ function computeJoints(rec) {
         const t = ((x - ax) * dx + (y - ay) * dy) / L2; if (t < 0 || t > 1) continue;
         const lat = Math.abs(((x - ax) * -dy + (y - ay) * dx) / Math.sqrt(L2)), z = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t;
         if (Math.abs(z - (top + 2.2)) > 1.5 || lat > w.hw + 16) continue;   // 在這座帽梁上
+        if (w.M && (w.M[i] & 4)) continue;                                    // 匝道整段疊在主線路面內
+        // 路線中心要落在帽梁範圍內 (只撐另一個方向的橋墩不算)
+        const pnx = -A[k * 9 + 3], pny = A[k * 9 + 2], sc = (ax + dx * t - x) * pnx + (ay + dy * t - y) * pny;
+        const c0 = Math.min(A[k * 9 + 7], A[k * 9 + 8]), c1 = Math.max(A[k * 9 + 7], A[k * 9 + 8]);
+        if (sc < c0 - 1.5 || sc > c1 + 1.5) continue;
         const b = best.get(w); if (!b || lat < b.d) best.set(w, { d: lat, i });
       }
     }
-    for (const [w, b] of best) mk(jointOn(w, b.i, x, y));
+    // 主線先放 (重疊時保留主線那一道)
+    for (const [w, b] of [...best].sort((p, q) => (p[0].link ? 1 : 0) - (q[0].link ? 1 : 0) || q[0].hw - p[0].hw)) mk(jointOn(w, b.i, x, y));
   }
   for (const k of rec.ways) {             // 橋頭 (橋接地面路段處)
     const w = WAYS[k];
@@ -1024,6 +1116,6 @@ async function warmShaders(camera) {
   scene.remove(grp);
 }
 
-Object.assign(TW, { TILES, TERR_REC, tilesNear, tileDist, streamTick, streamFrame, ensureArea, orthoFrame, cullBuildings, visFrame, crossedJoint,
+Object.assign(TW, { BAR_LOW, TILES, TERR_REC, tilesNear, tileDist, streamTick, streamFrame, ensureArea, orthoFrame, cullBuildings, visFrame, crossedJoint,
   warmShaders, runJobs, flushJobs, worldGroup, box, GB });
 })();
