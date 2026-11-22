@@ -837,10 +837,261 @@ function addTunnel(B, w) {
       box(B.g('tcab', cx, cy), cx, cy, ny[k], -nx[k], 0.4, 0.09, p.z + 0.85, p.z + 1.85);
     }
   }
-  for (const i of [0, n - 1]) if (isTunnelEnd(w, i)) B.chunk(P[i * 3], P[i * 3 + 1]).extra.push(portalMesh(w, i));
+  // 國 1 基隆端的中興 / 大業隧道: 兩個洞口共用一面照實景精細建模的洞門 (由中興隧道建)
+  const zx = !params.has('nozx') && zxPair(w);
+  for (const i of [0, n - 1]) if (isTunnelEnd(w, i) && !(zx && i === zx.end)) B.chunk(P[i * 3], P[i * 3 + 1]).extra.push(portalMesh(w, i));
+  if (zx && zx.build) { const m = zhongxingPortal(zx); B.chunk(m.userData.x, m.userData.y).extra.push(m); }
   if (!params.has('nokm')) kmTunnel(B, w, a);
-  if (w.oneway && !w.link && isTunnelEnd(w, 0)) { const m = tunnelSign(w); if (m) B.chunk(m.userData.x, m.userData.y).extra.push(m); }
+  if (w.oneway && !w.link && isTunnelEnd(w, 0) && !zx) { const m = tunnelSign(w); if (m) B.chunk(m.userData.x, m.userData.y).extra.push(m); }
 }
+/** 中興 (南下入口 = 起點) / 大業 (北上出口 = 終點): 兩條都載入、洞口相距 50 m 內才用共用洞門。
+ *  回傳 { end: 這條路跳過一般洞口的端點, build: 由這條建 (中興), zw, dw } */
+function zxPair(w) {
+  if (!w.tunnel || !/中興隧道|大業隧道/.test(w.name || '')) return null;
+  const zw = /中興/.test(w.name) ? w : WAYS.find((o) => o && o.tunnel && /中興隧道/.test(o.name || ''));
+  const dw = /大業/.test(w.name) ? w : WAYS.find((o) => o && o.tunnel && /大業隧道/.test(o.name || ''));
+  if (!zw || !dw) return null;
+  const e = (dw.n - 1) * 3;
+  if (Math.hypot(dw.P[e] - zw.P[0], dw.P[e + 1] - zw.P[1]) > 50) return null;
+  return { end: w === zw ? 0 : w.n - 1, build: w === zw, zw, dw };
+}
+// ======================================================================= 中興 / 大業隧道洞門 (照 Google 街景 2024-05 精細建模)
+// 實景: 一整面米白色洞門牆 (頂上一排城垛)，兩個馬蹄形洞口外圈深灰石框；中間綠白對角圖案大板，上方深綠底金字「國道中山高速公路」匾；
+// 兩洞口上方各一塊「大業隧道」「中興隧道」匾；兩側斜面石砌擋土牆 (邊上一支洩水鋼管)；牆頂草坡上白色大字「大道之行」；
+// 兩方向之間是藍白石材鋪面的分隔島；中興洞口右側牆上白牌「中興隧道 長396公尺」，右側路邊紅牌「隧道內禁止變換車道」
+function zxTex(w, h, draw, rep) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  draw(cv.getContext('2d'), w, h);
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 8;
+  if (rep) { t.wrapS = t.wrapT = T.RepeatWrapping; t.repeat.set(rep[0], rep[1]); }
+  return t;
+}
+/** 固定種子亂數 (每次建出來一樣) */
+function zxRand(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+var ZX_KAI = '"DFKai-SB","BiauKai","標楷體","KaiTi","STKaiti","Noto Serif TC","PMingLiU",serif';
+var ZX_HEI = '"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif';
+var ZX_MAT = null;
+function zxMats() {
+  if (ZX_MAT) return ZX_MAT;
+  const R = zxRand(7);
+  const std = (o) => new T.MeshStandardMaterial(Object.assign({ roughness: 0.85, metalness: 0 }, o));
+  // 洞門牆: 米白粉刷，有雨水流下的淡灰污漬 (6 m 一張)
+  const wall = zxTex(512, 512, (c, w, h) => {
+    c.fillStyle = '#dcd8cc'; c.fillRect(0, 0, w, h);
+    for (let i = 0; i < 260; i++) { c.fillStyle = `rgba(${120 + R() * 40},${118 + R() * 40},${105 + R() * 40},${0.03 + R() * 0.05})`; c.fillRect(R() * w, R() * h, 4 + R() * 30, 20 + R() * 160); }
+    c.strokeStyle = 'rgba(90,88,80,0.18)'; c.lineWidth = 2;
+    for (let x = 0; x <= w; x += w / 2) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke(); }
+  }, [1 / 6, 1 / 6]);
+  // 擋土牆: 不規則長方形石塊亂砌 (4 m 一張)
+  const stone = zxTex(512, 512, (c, w, h) => {
+    c.fillStyle = '#b9b6ad'; c.fillRect(0, 0, w, h);
+    for (let y = 0; y < h; y += 26 + R() * 10) {
+      let x = -R() * 40; const rh = 22 + R() * 12;
+      while (x < w) { const bw = 30 + R() * 70, g = 200 + R() * 30; c.fillStyle = `rgb(${g | 0},${(g - 3) | 0},${(g - 12) | 0})`; c.fillRect(x + 2, y + 2, bw - 4, rh - 4); x += bw; }
+    }
+    for (let i = 0; i < 120; i++) { c.fillStyle = `rgba(60,70,50,${0.05 + R() * 0.08})`; c.fillRect(R() * w, R() * h, 3 + R() * 18, 3 + R() * 18); }
+  }, [1, 1]);
+  const grass = zxTex(256, 256, (c, w, h) => {
+    c.fillStyle = '#5a8236'; c.fillRect(0, 0, w, h);
+    for (let i = 0; i < 1800; i++) { const g = R(); c.fillStyle = `rgba(${(40 + g * 60) | 0},${(90 + g * 70) | 0},${(25 + g * 30) | 0},0.5)`; c.fillRect(R() * w, R() * h, 2, 3 + R() * 4); }
+  }, [1, 1]);
+  // 分隔島鋪面: 灰白石板亂鋪，中間有藍色波浪 (8 m 一張)
+  const pave = zxTex(512, 512, (c, w, h) => {
+    c.fillStyle = '#bdbcb6'; c.fillRect(0, 0, w, h);
+    for (let y = 0; y < h; y += 22) for (let x = -R() * 30; x < w; x += 28 + R() * 30) { const g = 175 + R() * 55; c.fillStyle = `rgb(${g | 0},${g | 0},${(g - 4) | 0})`; c.fillRect(x + 1.5, y + 1.5, 26 + R() * 20, 19); }
+    c.globalAlpha = 0.4; c.fillStyle = '#4a6c96';
+    for (let k = 0; k < 2; k++) {
+      c.beginPath(); const y0 = 60 + k * 170; c.moveTo(0, y0);
+      for (let x = 0; x <= w; x += 16) c.lineTo(x, y0 + Math.sin(x / 60 + k) * 30);
+      for (let x = w; x >= 0; x -= 16) c.lineTo(x, y0 + 55 + Math.sin(x / 70 + k * 2) * 25);
+      c.fill();
+    }
+    c.globalAlpha = 1;
+  }, [1, 1]);
+  // 中間綠白對角大板: 上下白色三角形尖端在中央相接，左右綠色 (上半深綠、下半淺綠)，外圈綠框
+  const panel = zxTex(1024, 540, (c, w, h) => {
+    const cx = w / 2, cy = h * 0.52;
+    c.fillStyle = '#f4f4f0'; c.fillRect(0, 0, w, h);
+    const tri = (pts, col) => { c.fillStyle = col; c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (const p of pts.slice(1)) c.lineTo(p[0], p[1]); c.closePath(); c.fill(); };
+    for (const sx of [0, w]) { tri([[sx, 0], [cx, cy], [sx, cy]], '#1d8f3a'); tri([[sx, cy], [cx, cy], [sx, h]], '#3fb54a'); }
+    c.fillStyle = 'rgba(0,0,0,0.04)'; c.fillRect(0, cy, w, h - cy);
+    c.strokeStyle = '#1d8f3a'; c.lineWidth = 14; c.strokeRect(7, 7, w - 14, h - 14);
+  });
+  // 深綠底金字匾
+  const plaque = (text, size, sp) => zxTex(Math.round(size * (text.length * (1 + sp) + 1)), size * 2, (c, w, h) => {
+    c.fillStyle = '#21402f'; c.fillRect(0, 0, w, h);
+    c.strokeStyle = '#b9a86a'; c.lineWidth = size * 0.08; c.strokeRect(size * 0.12, size * 0.12, w - size * 0.24, h - size * 0.24);
+    c.fillStyle = '#d9c88a'; c.font = `bold ${size}px ${ZX_KAI}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    const step = size * (1 + sp), x0 = w / 2 - step * (text.length - 1) / 2;
+    [...text].forEach((ch, i) => c.fillText(ch, x0 + step * i, h / 2 + size * 0.05));
+  });
+  const hillChar = (ch) => zxTex(256, 256, (c, w, h) => { c.fillStyle = '#f7f7f2'; c.font = `bold 230px ${ZX_KAI}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(ch, w / 2, h / 2 + 10); });
+  const red = zxTex(320, 640, (c, w, h) => {
+    c.fillStyle = '#c8202a'; c.fillRect(0, 0, w, h);
+    c.strokeStyle = '#f4f4f0'; c.lineWidth = 10; c.strokeRect(12, 12, w - 24, h - 24);
+    c.fillStyle = '#f4f4f0'; c.font = `bold 96px ${ZX_HEI}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    [...'隧道內禁止'].forEach((ch, i) => c.fillText(ch, w * 0.7, 80 + i * 112));   // 右欄
+    [...'變換車道'].forEach((ch, i) => c.fillText(ch, w * 0.3, 80 + i * 112));     // 左欄
+  });
+  const nameSign = zxTex(512, 256, (c, w, h) => {
+    c.fillStyle = '#ecece6'; c.fillRect(0, 0, w, h);
+    c.strokeStyle = '#2a2a2a'; c.lineWidth = 6; c.strokeRect(10, 10, w - 20, h - 20);
+    c.fillStyle = '#1a1a1a'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = `bold 92px ${ZX_HEI}`; c.fillText('中 興 隧 道', w / 2, 95);
+    c.font = `bold 52px ${ZX_HEI}`; c.fillText('長  396  公尺', w / 2, 192);
+  });
+  const lane = zxTex(128, 128, (c, w, h) => {
+    c.fillStyle = '#0c0c0c'; c.fillRect(0, 0, w, h);
+    c.fillStyle = '#35ff6a'; c.beginPath(); c.moveTo(64, 108); c.lineTo(28, 66); c.lineTo(52, 66); c.lineTo(52, 22); c.lineTo(76, 22); c.lineTo(76, 66); c.lineTo(100, 66); c.closePath(); c.fill();
+  });
+  const chev = zxTex(256, 128, (c, w, h) => {
+    c.fillStyle = '#f2c200'; c.fillRect(0, 0, w, h); c.fillStyle = '#151515';
+    for (let x = -h; x < w + h; x += 64) { c.beginPath(); c.moveTo(x, h); c.lineTo(x + 32, h); c.lineTo(x + 32 + h, 0); c.lineTo(x + h, 0); c.closePath(); c.fill(); }
+  });
+  const pl = (tex) => std({ map: tex, emissiveMap: tex, emissive: new T.Color(0.15, 0.15, 0.15), roughness: 0.55, side: T.DoubleSide });
+  ZX_MAT = {
+    wall: std({ map: wall, roughness: 0.9 }), stone: std({ map: stone, roughness: 0.95, side: T.DoubleSide }), grass: std({ map: grass, roughness: 1, side: T.DoubleSide }),
+    rim: std({ color: new T.Color(0.2, 0.2, 0.19), roughness: 0.8 }), cap: std({ color: new T.Color(0.62, 0.61, 0.57), roughness: 0.9 }),
+    pave: std({ map: pave, roughness: 0.9, side: T.DoubleSide }), panel: pl(panel),
+    road: pl(plaque('國道中山高速公路', 120, 0.55)), zname: pl(plaque('中興隧道', 120, 0.35)), dname: pl(plaque('大業隧道', 120, 0.35)),
+    chars: [...'大道之行'].map((ch) => std({ map: hillChar(ch), transparent: true, alphaTest: 0.4, roughness: 0.9, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, side: T.DoubleSide })),
+    red: pl(red), nameSign: pl(nameSign), lane: std({ map: lane, emissiveMap: lane, emissive: new T.Color(1, 1, 1), roughness: 0.4 }), chev: pl(chev),
+    steel: std({ color: new T.Color(0.55, 0.56, 0.57), metalness: 0.6, roughness: 0.45 }),
+  };
+  return ZX_MAT;
+}
+function zhongxingPortal({ zw, dw }) {
+  const M = zxMats(), grp = new T.Group();
+  const e = (dw.n - 1) * 3, O = [zw.P[0], zw.P[1]], E = [dw.P[e], dw.P[e + 1]], z0 = (zw.P[2] + dw.P[e + 2]) / 2;
+  // 洞門座標: sx 沿牆面 (面向洞口時的右手方向)、h 離路面高、sz 往洞外 (朝來車)；原點在中興洞口中心
+  const D = Math.hypot(O[0] - E[0], O[1] - E[1]), Xd = [(O[0] - E[0]) / D, (O[1] - E[1]) / D], Zd = [Xd[1], -Xd[0]];
+  const W = (sx, h, sz) => [O[0] + Xd[0] * sx + Zd[0] * sz, O[1] + Xd[1] * sx + Zd[1] * sz, z0 + h];
+  const add = (geo, mat, cast = true) => { const m = new T.Mesh(geo, mat); m.castShadow = cast; m.receiveShadow = true; m.matrixAutoUpdate = false; grp.add(m); return m; };
+  const place = (geo) => {   // 形狀座標 (x = sx, y = h, z = sz) -> three
+    const p = geo.attributes.position;
+    for (let i = 0; i < p.count; i++) { const q = W(p.getX(i), p.getY(i), p.getZ(i)); p.setXYZ(i, q[0], q[2], -q[1]); }
+    geo.computeVertexNormals(); geo.computeBoundingSphere(); return geo;
+  };
+  /** 四邊形 (四個洞門座標點，逆時針面向觀看者) + uv */
+  const quad = (pts, uvs, mat, cast = false) => {
+    const g = new GB('uv'); const ids = pts.map((q, i) => { const p = W(q[0], q[1], q[2]); return g.vv([p[0], p[1], p[2], uvs[i][0], uvs[i][1]]); });
+    g.q(ids[0], ids[1], ids[2], ids[3]);
+    const m = withUv(g.mesh(mat, { cast })); grp.add(m); return m;
+  };
+  const UV1 = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const xD = -D, aZ = zw.hw + 0.9, aD = dw.hw + 0.9, H = 7.2, Hw = 2.9, RIM = 1.0, TOP = 10.8;
+  const arch = (cx, a, k, path) => {   // 馬蹄形洞口 (跟隧道斷面同一條曲線)；k: 往外放大 m
+    const A = a + k, HH = H + k;
+    path.moveTo(cx - A, -0.6); path.lineTo(cx - A, Hw);
+    for (let j = 1; j < 24; j++) { const t = Math.PI * j / 24; path.lineTo(cx - Math.cos(t) * A, Hw + Math.sin(t) * (HH - Hw)); }
+    path.lineTo(cx + A, Hw); path.lineTo(cx + A, -0.6); path.lineTo(cx - A, -0.6);
+  };
+  const L = xD - aD - 5.5, Rr = aZ + 5.5;   // 洞門牆左右端 (照實景: 洞口外側只留一小段平牆就接斜面擋土牆)
+  // ---- 洞門牆 (厚 1.2 m，挖兩個洞)
+  // 照實景: 洞門牆兩側的邊往外斜 (下窄上寬)，斜邊接著兩側斜面擋土牆；BAT = 牆頂比牆腳往外多出的寬度
+  const BAT = 6.5, LT = L - BAT, RT = Rr + BAT;
+  const sh = new T.Shape(); sh.moveTo(L, -0.6); sh.lineTo(Rr, -0.6); sh.lineTo(RT, TOP); sh.lineTo(LT, TOP); sh.lineTo(L, -0.6);
+  for (const [cx, a] of [[0, aZ], [xD, aD]]) { const hp = new T.Path(); arch(cx, a, 0, hp); sh.holes.push(hp); }
+  const wg = new T.ExtrudeGeometry(sh, { depth: 1.2, bevelEnabled: false, curveSegments: 2 }); wg.translate(0, 0, -1.2);
+  add(place(wg), M.wall);
+  // ---- 中央凸出牆面 (兩個石框之間，掛大板和匾)
+  const c0 = xD + aD + RIM + 0.15, c1 = -aZ - RIM - 0.15;
+  add(place(new T.BoxGeometry(c1 - c0, TOP + 0.6, 0.3).translate((c0 + c1) / 2, (TOP - 0.6) / 2, 0.15)), M.wall);
+  // ---- 石框 (深灰，凸出 0.45 m)
+  for (const [cx, a] of [[0, aZ], [xD, aD]]) {
+    const rs = new T.Shape(); arch(cx, a, RIM, rs); const hp = new T.Path(); arch(cx, a, 0, hp); rs.holes.push(hp);
+    add(place(new T.ExtrudeGeometry(rs, { depth: 0.45, bevelEnabled: false, curveSegments: 2 })), M.rim);
+  }
+  // ---- 牆頂壓頂 + 城垛
+  add(place(new T.BoxGeometry(RT - LT, 0.25, 1.5).translate((LT + RT) / 2, TOP + 0.12, -0.55)), M.cap);
+  for (let x = LT + 0.4; x < RT - 0.3; x += 1.1) add(place(new T.BoxGeometry(0.55, 0.42, 0.45).translate(x + 0.27, TOP + 0.45, 0.05)), M.cap, false);
+  // ---- 綠白對角大板 + 國道中山高速公路匾
+  const pw = c1 - c0 - 0.5, ph = Math.min(7.0, pw / 1.85), pc = (c0 + c1) / 2;
+  quad([[pc - pw / 2, 0, 0.32], [pc + pw / 2, 0, 0.32], [pc + pw / 2, ph, 0.32], [pc - pw / 2, ph, 0.32]], UV1, M.panel);
+  const rw = Math.min(pw * 1.02, c1 - c0 - 0.2), rh = rw / ((8 * 1.55 + 1) / 2), ry = ph + 0.55;
+  add(place(new T.BoxGeometry(rw + 0.12, rh + 0.12, 0.12).translate(pc, ry + rh / 2, 0.36)), M.rim, false);
+  quad([[pc - rw / 2, ry, 0.43], [pc + rw / 2, ry, 0.43], [pc + rw / 2, ry + rh, 0.43], [pc - rw / 2, ry + rh, 0.43]], UV1, M.road);
+  // ---- 隧道名匾 (各洞口拱頂上方)
+  for (const [cx, mat] of [[0, M.zname], [xD, M.dname]]) {
+    const nw = 3.4, nh = nw / ((4 * 1.35 + 1) / 2), ny = H + RIM + 0.75;
+    add(place(new T.BoxGeometry(nw + 0.1, nh + 0.1, 0.1).translate(cx, ny + nh / 2, 0.05)), M.rim, false);
+    quad([[cx - nw / 2, ny, 0.11], [cx + nw / 2, ny, 0.11], [cx + nw / 2, ny + nh, 0.11], [cx - nw / 2, ny + nh, 0.11]], UV1, mat);
+  }
+  // ---- 白牌「中興隧道 長396公尺」(中興洞口右側牆上)
+  { const x0 = aZ + RIM + 0.5, x1 = x0 + 2.4, y0 = 3.0, y1 = 4.2;
+    quad([[x0, y0, 0.06], [x1, y0, 0.06], [x1, y1, 0.06], [x0, y1, 0.06]], UV1, M.nameSign); }
+  // ---- 洞口上方綠色車道管制燈 (每車道一盞) + 洞口兩側黃黑警示
+  for (const [cx, a] of [[0, aZ], [xD, aD]]) {
+    for (const sd of [-0.55, 0.55]) {
+      const lx = cx + sd * a * 0.62, ly = H - 1.3;
+      add(place(new T.BoxGeometry(0.75, 0.75, 0.35).translate(lx, ly, -0.6)), M.rim, false);
+      quad([[lx - 0.33, ly - 0.33, -0.42], [lx + 0.33, ly - 0.33, -0.42], [lx + 0.33, ly + 0.33, -0.42], [lx - 0.33, ly + 0.33, -0.42]], UV1, M.lane);
+    }
+    for (const sd of [-1, 1]) add(place(new T.BoxGeometry(0.5, 0.9, 1.6).translate(cx + sd * (a - 0.35), 0.45, 0.4)), M.chev, false);
+  }
+  // ---- 兩側斜面擋土牆 (石砌，往來車方向斜降到地面)，牆頂草皮，牆邊洩水鋼管
+  const wing = (sgn) => {
+    const xe = sgn > 0 ? Rr : L, run = 30;
+    const A = [xe, -0.6, 0], B2 = [xe + sgn * BAT, TOP, 0], C = [xe + sgn * 1.2, 0.8, run], Dd = [xe, -0.6, run];
+    const pts = sgn > 0 ? [Dd, A, B2, C] : [A, Dd, C, B2];
+    quad(pts, pts.map((q) => [(q[0] * sgn + q[2]) / 4, q[1] / 4]), M.stone, true);
+    const G1 = [B2[0] + sgn * 8, TOP + 2.5, -2], G2 = [C[0] + sgn * 8, 2.5, run + 2];
+    const gp = sgn > 0 ? [B2, G1, G2, C] : [G1, B2, C, G2];
+    quad(gp, gp.map((q) => [q[0] / 5, q[2] / 5]), M.grass);
+    const pp = []; for (let k = 0; k <= 6; k++) { const f = k / 6; pp.push(W(xe + sgn * (BAT * (1 - f) - 0.4), TOP - (TOP + 0.3) * f, 0.35 + f * 0.1)); }   // 洩水鋼管沿著斜邊
+    const tg = new GB(); tube(tg, pp, pp.map(() => 0.12), 8); grp.add(tg.mesh(M.steel, { cast: true }));
+  };
+  wing(1); wing(-1);
+  // ---- 牆頂草皮 + 白色大字「大道之行」: 牆頂往後 12 m 一條草皮，順著原本地形接過去 (後面的山就是原本的地形)
+  { const BK = 12, xs = [], zs = [];
+    for (let x = LT; x < RT + 0.1; x += 3) xs.push(Math.min(x, RT));
+    for (let z = 0; z <= BK; z += 2) zs.push(z);
+    const sm = (t) => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
+    const hAt = (sx, d) => {
+      const q = W(sx, 0, -0.3 - d), tr = terrainAt(q[0], q[1]), top = TOP + 0.25, ter = tr === 0 ? top : tr - z0 - 0.15;   // 地形還沒載入 (0) 就維持牆頂高
+      return Math.max(top, top + (ter - top) * sm(d / BK));   // 最低就是牆頂: 洞門後面地形比路面還低，往下接會插進隧道裡
+    };
+    const g = new GB('uv'), ids = zs.map((d) => xs.map((x) => { const q = W(x, hAt(x, d), -0.3 - d); return g.vv([q[0], q[1], q[2], x / 5, d / 5]); }));
+    for (let j = 0; j < zs.length - 1; j++) for (let i = 0; i < xs.length - 1; i++) g.q(ids[j][i], ids[j][i + 1], ids[j + 1][i + 1], ids[j + 1][i]);
+    grp.add(withUv(g.mesh(M.grass, { cast: false })));
+    const span = (RT - LT) * 0.88, cs = 6.5, x0 = (LT + RT) / 2 - span / 2, d0 = 0.6, d1 = d0 + cs * 0.85;
+    for (let k = 0; k < 4; k++) {
+      const cx = x0 + span * (k + 0.5) / 4, p = (u, d) => [cx + u * cs / 2, hAt(cx + u * cs / 2, d) + 0.06, -0.3 - d];
+      quad([p(-1, d0), p(1, d0), p(1, d1), p(-1, d1)], UV1, M.chars[k]);
+    } }
+  // ---- 分隔島藍白石材鋪面: 兩方向路面內側邊之間，從洞門往外鋪到兩條路靠攏
+  {
+    const nb = (w, node, wantEnd) => (PT_INDEX.get(ptKey(w.P[node * 3], w.P[node * 3 + 1])) || []).map(([k, i]) => [WAYS[k], i]).find(([o, i]) => o !== w && !o.tunnel && !o.link && (wantEnd ? i === o.n - 1 : i === 0));
+    const zp = nb(zw, 0, true), dn = nb(dw, dw.n - 1, false);
+    const edge = (o, d, fromEnd) => {   // 路面左緣 (分隔島那一側)
+      setupShoulders(o);
+      const p = along(o, fromEnd ? Math.max(0, o.len - d) : Math.min(o.len, d)), k = p.k, ex = o.hw + (o.eL ? o.eL[k] : 0) + 0.15;
+      return [p.x + o.nx[k] * ex, p.y + o.ny[k] * ex, p.z];
+    };
+    if (zp && dn) {
+      const g = new GB('uv');
+      let prev = null;
+      for (let d = 0; d <= 60; d += 3) {
+        const a = edge(zp[0], d, true), b = edge(dn[0], d, false);
+        if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1.2) break;
+        const zz = (a[2] + b[2]) / 2 + 0.04;
+        const ia = g.vv([a[0], a[1], zz, a[0] / 8, a[1] / 8]), ib = g.vv([b[0], b[1], zz, b[0] / 8, b[1] / 8]);
+        if (prev) g.q(prev[1], prev[0], ia, ib);
+        prev = [ia, ib];
+      }
+      const m = g.mesh(M.pave, { cast: false }); if (m) { withUv(m); grp.add(m); }
+    }
+  }
+  // ---- 紅牌「隧道內禁止變換車道」: 中興方向右側路邊、洞口前 14 m
+  { const x = zw.hw + 3.2, h0 = 2.6, bw = 1.6, bh = 3.2;
+    const tg = new GB(); tube(tg, [W(x + 0.95, -1.2, 14.1), W(x + 0.95, h0 + bh + 0.3, 14.1)], [0.08, 0.07], 8); grp.add(tg.mesh(M.steel, { cast: true }));
+    add(place(new T.BoxGeometry(bw + 0.06, bh + 0.06, 0.05).translate(x, h0 + bh / 2, 13.97)), M.steel, true);
+    quad([[x - bw / 2, h0, 14.0], [x + bw / 2, h0, 14.0], [x + bw / 2, h0 + bh, 14.0], [x - bw / 2, h0 + bh, 14.0]], UV1, M.red); }
+  const c = W(xD / 2, 0, 0);
+  grp.userData = { x: c[0], y: c[1] };
+  return grp;
+}
+
 /** 隧道入口前的白色名牌 (照國道 3 號街景「安坑隧道 長 455 公尺」): 洞口前 40 m、右側路肩外、兩支柱子 */
 function tunnelSign(w) {
   const { P, nx, ny, hw } = w;
@@ -1221,6 +1472,37 @@ function* buildTerrain(key, tx, ty, lod) {
   yield;
   // 隧道口附近山坡比隧道頂還低的方格挖掉 (只有最細的一級要做: 玩家才看得到隧道裡面)
   const inTunnel = (x, y, zt) => { const r = roadAt(x, y, zt + 12, -1.5, 0); return r && r.w.tunnel && zt < r.z + 8.6; };
+  // 中興 / 大業洞口 (共用洞門) 附近 150 m
+  const nearZX = (x, y) => {
+    const zw = WAYS.find((o) => o && o.tunnel && /中興隧道/.test(o.name || ''));
+    return !!zw && Math.hypot(x - zw.P[0], y - zw.P[1]) < 150;
+  };
+  // 中興 / 大業洞口: 被挖的 30 m 方格切成 SUBN x SUBN 小格 (原本地形雙線性內插)，只拿掉碰到隧道的小格；整格挖掉的話洞門後面會破一個大洞、後面的山像浮在半空
+  const SUBN = 5;
+  const subCell = (i, j) => {
+    const I = Is[i], J = Js[j], q = i * cols + j, cs = [q, q + 1, q + cols, q + cols + 1];
+    const zc = [hh(I, J), hh(I, J + 1), hh(I + 1, J), hh(I + 1, J + 1)];
+    const k0 = lcAt(I, J), ids = [];
+    for (let v = 0; v <= SUBN; v++) {
+      const row = [];
+      for (let u = 0; u <= SUBN; u++) {
+        const fu = u / SUBN, fv = v / SUBN, wts = [(1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv];
+        let z = 0, nx = 0, ny = 0, nz = 0;
+        for (let c = 0; c < 4; c++) { z += zc[c] * wts[c]; nx += g.nrm[cs[c] * 3] * wts[c]; ny += g.nrm[cs[c] * 3 + 1] * wts[c]; nz += g.nrm[cs[c] * 3 + 2] * wts[c]; }
+        const nl = Math.hypot(nx, ny, nz) || 1;
+        g.nrm.push(nx / nl, ny / nl, nz / nl);
+        W0.push(k0 === 1 ? 1 : 0, k0 === 2 ? 1 : 0, k0 === 3 ? 1 : 0, k0 === 4 ? 1 : 0);
+        W1.push(k0 === 5 ? 1 : 0, k0 === 6 ? 1 : 0, k0 === 7 ? 1 : 0, k0 === 8 ? 1 : 0);
+        row.push({ id: g.v((J + fu) * TSTEP, (I + fv) * TSTEP, z), x: (J + fu) * TSTEP, y: (I + fv) * TSTEP, z });
+      }
+      ids.push(row);
+    }
+    for (let v = 0; v < SUBN; v++) for (let u = 0; u < SUBN; u++) {
+      const c4 = [ids[v][u], ids[v][u + 1], ids[v + 1][u + 1], ids[v + 1][u]];
+      if (c4.some((p) => inTunnel(p.x, p.y, p.z))) continue;
+      g.q(c4[0].id, c4[1].id, c4[2].id, c4[3].id);
+    }
+  };
   for (let i = 0; i < rows - 1; i++) {
     for (let j = 0; j < cols - 1; j++) {
       const q = i * cols + j, I = Is[i], J = Js[j];
@@ -1237,7 +1519,7 @@ function* buildTerrain(key, tx, ty, lod) {
             const zt = (hh(I, J) * (1 - fu) + hh(I, J + 1) * fu) * (1 - fv) + (hh(I + 1, J) * (1 - fu) + hh(I + 1, J + 1) * fu) * fv;
             cut = inTunnel((J + fu) * TSTEP, (I + fv) * TSTEP, zt);
           }
-          if (cut) continue;
+          if (cut) { if (nearZX((Js[j] + 0.5) * TSTEP, (Is[i] + 0.5) * TSTEP)) subCell(i, j); continue; }   // 只有中興 / 大業洞口切細補回，其他隧道照舊整格挖掉
         }
       }
       g.q(q, q + 1, q + cols + 1, q + cols);

@@ -78,6 +78,13 @@ function makeWay(w) {
   if (!w.M) w.M = new Uint8Array(n);
   // 左法向與累積距離
   w.nx = new Float32Array(n); w.ny = new Float32Array(n); w.s = new Float32Array(n);
+  wayGeom(w);
+  WAYS.push(w); GID.set(w.gid, w.k); indexWay(w);
+  return w;
+}
+/** 左法向、累積距離、外框、長度 (路形改過要重算) */
+function wayGeom(w) {
+  const n = w.n;
   for (let i = 0; i < n; i++) {
     const a = Math.max(i - 1, 0), b = Math.min(i + 1, n - 1);
     const dx = w.P[b * 3] - w.P[a * 3], dy = w.P[b * 3 + 1] - w.P[a * 3 + 1], L = Math.hypot(dx, dy) || 1;
@@ -91,8 +98,28 @@ function makeWay(w) {
   }
   w.bb = [x0 - w.hw, y0 - w.hw, x1 + w.hw, y1 + w.hw];
   w.len = w.s[n - 1];
-  WAYS.push(w); GID.set(w.gid, w.k); indexWay(w);
-  return w;
+}
+// 路形修正: 國 1 基隆端 0K 到中興 / 大業隧道洞口只有約 100 m，OSM 兩方向從間距 16 m 直線拉開到 31 m (V 字形、不平行)。
+// 照實景改成: 靠近洞口順著隧道方向平行延伸，再用 S 形慢慢收窄接回 0K 端點 (兩端接點不動)。
+// { gid 引道, tun 隧道, toPortal: 引道的終點接洞口 (南下) / 起點接洞口 (北上) }
+const GEOM_FIX = [{ gid: 1158, tun: 1140, toPortal: true }, { gid: 1141, tun: 1157, toPortal: false }];
+function applyGeomFixes() {
+  for (const f of GEOM_FIX) {
+    if (f.done || params.has('nogeomfix')) continue;
+    const w = wayByGid(f.gid), t = wayByGid(f.tun);
+    if (!w || !t) continue;
+    f.done = true;
+    // 洞口點與隧道方向 (南下: 隧道起點；北上: 隧道終點)
+    const e = f.toPortal ? 0 : t.n - 1, px = t.P[e * 3], py = t.P[e * 3 + 1], tx = t.ny[e], ty = -t.nx[e];
+    const L = w.len;
+    for (let i = 0; i < w.n; i++) {
+      const d = f.toPortal ? L - w.s[i] : w.s[i];               // 離洞口距離
+      const u = Math.min(1, d / L), k = 1 - u * u * (3 - 2 * u);   // 洞口 1 → 0K 端 0
+      const lx = f.toPortal ? px - tx * d : px + tx * d, ly = f.toPortal ? py - ty * d : py + ty * d;
+      w.P[i * 3] += (lx - w.P[i * 3]) * k; w.P[i * 3 + 1] += (ly - w.P[i * 3 + 1]) * k;
+    }
+    wayGeom(w); indexWay(w);   // 格子索引重加 (舊格子裡多出來的項目 roadAt 會自己用幾何判斷掉)
+  }
 }
 /** 高度 Int16 (0.1 m): 3276.8 m 以上存的時候會繞回負數，小於 -500 m 的值加 65536 換回來 */
 const Z16 = (v) => (v < -5000 ? v + 65536 : v) * 0.1;
@@ -142,6 +169,7 @@ function ingestDetail(buf) {
     bxy[v * 2] = bxy0[b * 2] + boff[v * 2] * 0.1; bxy[v * 2 + 1] = bxy0[b * 2 + 1] + boff[v * 2 + 1] * 0.1;
   }
   if (hd.ramp) { for (const r of hd.ramp) RAMP_PENDING.push(r); resolveRamps(); }
+  applyGeomFixes();
   return { ways, piers, bld: hd.nb ? { bxy, bbase, bh, bcnt, bcol, nb: hd.nb } : null };
 }
 // 匝道接主線 (scripts/fix_clip.mjs): 匝道端點已移到主線外側，記錄 [匝道 gid, 端點, 在主線哪一側, 主線 gid, 原本重合的主線點]。
