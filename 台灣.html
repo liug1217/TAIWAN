@@ -3505,22 +3505,27 @@ function zhongxingPortal({ zw, dw }) {
     const tg = new GB(); tube(tg, pp, pp.map(() => 0.12), 8); grp.add(tg.mesh(M.steel, { cast: true }));
   };
   wing(1); wing(-1);
-  // ---- 牆頂草皮 + 白色大字「大道之行」: 牆頂往後 12 m 一條草皮，順著原本地形接過去 (後面的山就是原本的地形)
-  { const BK = 12, xs = [], zs = [];
-    for (let x = LT; x < RT + 0.1; x += 3) xs.push(Math.min(x, RT));
-    for (let z = 0; z <= BK; z += 2) zs.push(z);
+  // ---- 牆頂草坡 + 白色大字「大道之行」
+  const back = 22, rise = 7.5;
+  // 地形網格在隧道口會把「比隧道頂低」的 30 m 方格整格挖掉 (才看得到洞口)，洞門後面因此破一個大洞、後面的山像浮在半空。
+  // 草坡往左右各多鋪 40 m、往後鋪 90 m 把洞補滿: 洞門正後方照實景斜坡，往外 / 往後漸漸貼回地形 (比地形低 0.3 m，地形還在的地方看不到)
+  { const BK = 44, FAR = 90, SIDE = 40, xs = [], zs = [];
+    for (let x = L - SIDE; x < Rr + SIDE + 0.1; x += 4) xs.push(Math.min(x, Rr + SIDE));
+    for (let z = 0; z <= FAR; z += 4) zs.push(z);
     const sm = (t) => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
     const hAt = (sx, d) => {
-      const q = W(sx, 0, -0.3 - d), tr = terrainAt(q[0], q[1]), top = TOP + 0.25, ter = tr === 0 ? top : tr - z0 - 0.15;   // 地形還沒載入 (0) 就維持牆頂高
-      return Math.max(top, top + (ter - top) * sm(d / BK));   // 最低就是牆頂: 洞門後面地形比路面還低，往下接會插進隧道裡
+      const ramp = TOP + 0.25 + rise * Math.min(d, back) / back, q = W(sx, 0, -0.3 - d), tr = terrainAt(q[0], q[1]), ter = tr === 0 ? ramp : tr - z0 - 0.3;   // 地形還沒載入 (0) 就維持斜坡
+      const core = ramp + (ter - ramp) * sm((d - back * 0.6) / (BK - back * 0.6));
+      const wl = 1 - sm(Math.max(0, LT - 2 - sx, sx - RT - 2) / 12);   // 洞門寬度外: 漸漸變成貼地形
+      return ter + (core - ter) * wl;
     };
     const g = new GB('uv'), ids = zs.map((d) => xs.map((x) => { const q = W(x, hAt(x, d), -0.3 - d); return g.vv([q[0], q[1], q[2], x / 5, d / 5]); }));
     for (let j = 0; j < zs.length - 1; j++) for (let i = 0; i < xs.length - 1; i++) g.q(ids[j][i], ids[j][i + 1], ids[j + 1][i + 1], ids[j + 1][i]);
-    grp.add(withUv(g.mesh(M.grass, { cast: false })));
-    const span = (RT - LT) * 0.88, cs = 6.5, x0 = (LT + RT) / 2 - span / 2, d0 = 0.6, d1 = d0 + cs * 0.85;
+    const m = withUv(g.mesh(M.grass, { cast: false })); grp.add(m); }
+  { const span = (RT - LT) * 0.88, cs = 7.5, x0 = (LT + RT) / 2 - span / 2, f0 = 0.03, f1 = f0 + cs / Math.hypot(back, rise);
     for (let k = 0; k < 4; k++) {
-      const cx = x0 + span * (k + 0.5) / 4, p = (u, d) => [cx + u * cs / 2, hAt(cx + u * cs / 2, d) + 0.06, -0.3 - d];
-      quad([p(-1, d0), p(1, d0), p(1, d1), p(-1, d1)], UV1, M.chars[k]);
+      const cx = x0 + span * (k + 0.5) / 4, p = (u, f) => [cx + u * cs / 2, TOP + 0.3 + rise * f, -0.3 - back * f];
+      quad([p(-1, f0), p(1, f0), p(1, f1), p(-1, f1)], UV1, M.chars[k]);
     } }
   // ---- 分隔島藍白石材鋪面: 兩方向路面內側邊之間，從洞門往外鋪到兩條路靠攏
   {
@@ -3935,37 +3940,6 @@ function* buildTerrain(key, tx, ty, lod) {
   yield;
   // 隧道口附近山坡比隧道頂還低的方格挖掉 (只有最細的一級要做: 玩家才看得到隧道裡面)
   const inTunnel = (x, y, zt) => { const r = roadAt(x, y, zt + 12, -1.5, 0); return r && r.w.tunnel && zt < r.z + 8.6; };
-  // 中興 / 大業洞口 (共用洞門) 附近 150 m
-  const nearZX = (x, y) => {
-    const zw = WAYS.find((o) => o && o.tunnel && /中興隧道/.test(o.name || ''));
-    return !!zw && Math.hypot(x - zw.P[0], y - zw.P[1]) < 150;
-  };
-  // 中興 / 大業洞口: 被挖的 30 m 方格切成 SUBN x SUBN 小格 (原本地形雙線性內插)，只拿掉碰到隧道的小格；整格挖掉的話洞門後面會破一個大洞、後面的山像浮在半空
-  const SUBN = 5;
-  const subCell = (i, j) => {
-    const I = Is[i], J = Js[j], q = i * cols + j, cs = [q, q + 1, q + cols, q + cols + 1];
-    const zc = [hh(I, J), hh(I, J + 1), hh(I + 1, J), hh(I + 1, J + 1)];
-    const k0 = lcAt(I, J), ids = [];
-    for (let v = 0; v <= SUBN; v++) {
-      const row = [];
-      for (let u = 0; u <= SUBN; u++) {
-        const fu = u / SUBN, fv = v / SUBN, wts = [(1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv];
-        let z = 0, nx = 0, ny = 0, nz = 0;
-        for (let c = 0; c < 4; c++) { z += zc[c] * wts[c]; nx += g.nrm[cs[c] * 3] * wts[c]; ny += g.nrm[cs[c] * 3 + 1] * wts[c]; nz += g.nrm[cs[c] * 3 + 2] * wts[c]; }
-        const nl = Math.hypot(nx, ny, nz) || 1;
-        g.nrm.push(nx / nl, ny / nl, nz / nl);
-        W0.push(k0 === 1 ? 1 : 0, k0 === 2 ? 1 : 0, k0 === 3 ? 1 : 0, k0 === 4 ? 1 : 0);
-        W1.push(k0 === 5 ? 1 : 0, k0 === 6 ? 1 : 0, k0 === 7 ? 1 : 0, k0 === 8 ? 1 : 0);
-        row.push({ id: g.v((J + fu) * TSTEP, (I + fv) * TSTEP, z), x: (J + fu) * TSTEP, y: (I + fv) * TSTEP, z });
-      }
-      ids.push(row);
-    }
-    for (let v = 0; v < SUBN; v++) for (let u = 0; u < SUBN; u++) {
-      const c4 = [ids[v][u], ids[v][u + 1], ids[v + 1][u + 1], ids[v + 1][u]];
-      if (c4.some((p) => inTunnel(p.x, p.y, p.z))) continue;
-      g.q(c4[0].id, c4[1].id, c4[2].id, c4[3].id);
-    }
-  };
   for (let i = 0; i < rows - 1; i++) {
     for (let j = 0; j < cols - 1; j++) {
       const q = i * cols + j, I = Is[i], J = Js[j];
@@ -3982,7 +3956,7 @@ function* buildTerrain(key, tx, ty, lod) {
             const zt = (hh(I, J) * (1 - fu) + hh(I, J + 1) * fu) * (1 - fv) + (hh(I + 1, J) * (1 - fu) + hh(I + 1, J + 1) * fu) * fv;
             cut = inTunnel((J + fu) * TSTEP, (I + fv) * TSTEP, zt);
           }
-          if (cut) { if (nearZX((Js[j] + 0.5) * TSTEP, (Is[i] + 0.5) * TSTEP)) subCell(i, j); continue; }   // 只有中興 / 大業洞口切細補回，其他隧道照舊整格挖掉
+          if (cut) continue;
         }
       }
       g.q(q, q + 1, q + cols + 1, q + cols);
