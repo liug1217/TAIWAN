@@ -85,7 +85,9 @@ S.manual = false; S.gear = 1; S.rpm = RPM_IDLE; S.cruise = null;
 try { S.manual = localStorage.getItem('tw_manual') === '1'; } catch (_) {}
 if (params.get('manual') === '1') S.manual = true;
 const wheelR = () => (S.vt && S.vt.len > 6.5 ? 0.5 : S.vtype === 'scooter' ? 0.28 : 0.33);
-const finalDrive = () => { const vt = S.vt || { vmax: 45 }; return RPM_MAX * 0.92 / 60 * 2 * Math.PI * wheelR() / (GEAR_R[5] * vt.vmax * 1.2); };
+/** 玩家車極速 (m/s): 機車照車種，其他一律 200 km/h */
+const vTop = () => (S.vtype === 'scooter' ? ((S.vt && S.vt.vmax) || 18) * 1.2 : 200 / 3.6);
+const finalDrive = () => RPM_MAX * 0.92 / 60 * 2 * Math.PI * wheelR() / (GEAR_R[5] * vTop());
 const rpmAt = (g, v) => Math.abs(v) / (2 * Math.PI * wheelR()) * 60 * GEAR_R[g - 1] * finalDrive();
 /** 扭力曲線 (0..1): 1000 rpm 六成、3500~4500 最大、6000 以後掉、6500 斷油 */
 const torqueAt = (rpm) => rpm >= RPM_MAX ? 0 : rpm < 3500 ? 0.55 + 0.45 * smooth01(900, 3500, rpm) : rpm < 4500 ? 1 : 1 - 0.45 * smooth01(4500, RPM_MAX, rpm);
@@ -136,7 +138,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyU') shift(1);
   if (e.code === 'KeyJ') shift(-1);
   if (e.code === 'KeyI') toggleCruise();
-  if ((e.code === 'Equal' || e.code === 'NumpadAdd') && S.cruise) S.cruise = Math.min(S.cruise + 5 / 3.6, 160 / 3.6);
+  if ((e.code === 'Equal' || e.code === 'NumpadAdd') && S.cruise) S.cruise = Math.min(S.cruise + 5 / 3.6, vTop());
   if ((e.code === 'Minus' || e.code === 'NumpadSubtract') && S.cruise) S.cruise = Math.max(S.cruise - 5 / 3.6, 20 / 3.6);
   for (const f of HOOKS.key) f(e);
   if (e.code === 'KeyQ' || e.code === 'KeyE') {   // 手動方向燈 Q 左、E 右 (再按一次關)；自動駕駛時路口依方向燈轉彎
@@ -269,7 +271,8 @@ function laneCenterSteer(maxSteer) {
     S.lcLane = b; S.lcWay = w.k; S.lcDir = dir;
   }
   const off = laneOffDir(w, Math.min(S.lcLane, lc - 1), dir);
-  if (Math.abs(off - r.lat) > LANE_W * 0.9) { S.lcLane = null; return null; }   // 方向盤放開後還在滑: 下一格重選最近車道
+  // 離最近車道中心超過 0.6 線寬 = 在路肩 / 分岔的槽化區上 (正要開進匝道): 不拉回主線
+  if (Math.abs(off - r.lat) > LANE_W * 0.6) { S.lcLane = null; return null; }
   // 從投影點沿車道往前 L 公尺；到路段端點就接到「車道對得上」的下一段 (車道縮減就併到相鄰車道、在出口車道就跟著匝道)，接不上才沿切線延伸
   let P = w.P, cw = w, cdir = dir, coff = off, hops = 0;
   const i = r.i;
@@ -307,6 +310,46 @@ function laneCenterSteer(maxSteer) {
   const al = Math.atan2(Math.sin(Math.atan2(dy, dx) - S.h), Math.cos(Math.atan2(dy, dx) - S.h));
   S.lcOn = true;
   return Math.max(-0.8, Math.min(0.8, Math.atan2(2 * WB * Math.sin(al), Ld) / maxSteer));
+}
+
+/** 兩條相鄰路面可以直接開過去嗎 (分合流、同一條國道前後段、一般道路路口)。
+ *  中間有護欄的不會相鄰 (fix_clip 只在路緣落在別條路面上時拿掉護欄)，所以只看方向和高度 */
+function joinable(a, b) {
+  if (Math.abs(a.z - b.z) > 1.0) return false;
+  if (a.w.city && b.w.city) return true;
+  const dot = a.tx * b.tx + a.ty * b.ty;
+  if (a.w.city || b.w.city) return (a.w.link || b.w.link) && Math.abs(dot) > 0.3;   // 匝道接平面道路
+  if (!a.w.oneway || !b.w.oneway) return Math.abs(dot) > 0.5;
+  return dot > 0.5 && (a.w.link || b.w.link || (a.w.ref && a.w.ref === b.w.ref));
+}
+/** 分岔 / 合流節點附近，兩條相接路面中間的楔形縫 (OSM 路面沒蓋滿，畫面上 world.js 用混凝土補平了):
+ *  (x, y) 左右 4.5 m 內各有一條路、兩條相接 (共用端點，或匝道接主線) 且接點在 80 m 內 → 算在路上，回傳較高的那條 */
+function gapRoad(x, y, h, zRef) {
+  const ax = -Math.sin(h), ay = Math.cos(h);
+  let L = null, R = null;
+  for (let d = 0.5; d <= 4.5 && !(L && R); d += 0.5) {
+    if (!L) L = roadAt(x + ax * d, y + ay * d, zRef, 0);
+    if (!R) R = roadAt(x - ax * d, y - ay * d, zRef, 0);
+  }
+  if (!L || !R || L.w === R.w || !joinable(L, R)) return null;
+  const near = (px, py) => Math.hypot(px - x, py - y) < 80;
+  const ends = (w) => [[w.P[0], w.P[1]], [w.P[(w.n - 1) * 3], w.P[(w.n - 1) * 3 + 1]]];
+  let ok = false;
+  for (const p of ends(L.w)) for (const q of ends(R.w)) if (Math.hypot(p[0] - q[0], p[1] - q[1]) < 1.5 && near(p[0], p[1])) ok = true;
+  if (!ok) for (const [u, v] of [[L.w, R.w], [R.w, L.w]]) for (const rp of u.ramps || []) if (rp.mgid === v.gid && near(u.P[rp.e * 3], u.P[rp.e * 3 + 1])) ok = true;
+  return ok ? (L.z >= R.z ? L : R) : null;
+}
+/** 車身四個角 (左右、前方左右) 都落在路面上 (可以是不同但相接的路面) → 回傳車子中心所在的路 */
+function bodyOnRoads(x, y, h, pref) {
+  const c = roadAt(x, y, S.z, 0, 1.3, pref, true) || gapRoad(x, y, h, S.z);
+  if (!c) return null;
+  const m = MARGIN - 0.1, sx = -Math.sin(h) * m, sy = Math.cos(h) * m, fx = Math.cos(h) * WB * 0.5, fy = Math.sin(h) * WB * 0.5;
+  const pts = [x + sx, y + sy, x - sx, y - sy, x + sx + fx, y + sy + fy, x - sx + fx, y - sy + fy];
+  for (let k = 0; k < 8; k += 2) {
+    const q = roadAt(pts[k], pts[k + 1], S.z, 0, 1.3, c.w, true) || gapRoad(pts[k], pts[k + 1], h, S.z);
+    if (!q || (q.w !== c.w && !joinable(c, q))) return null;
+  }
+  return c;
 }
 
 function update(dt) {
@@ -443,8 +486,9 @@ function update(dt) {
   } else {
     S.apLane = null; S.apPending = null; S.rt = null;
     if (S.signalAuto) { S.signal = 0; S.signalAuto = false; }
-    if (str) { S.lcLane = null; S.lcOn = false; }
-    else if (laneCenter) { const c = laneCenterSteer(maxSteer); if (c != null) str = c; }
+    // 剛放開方向鍵的 0.7 秒內不介入: 用點的方式切出口 / 換車道時不會一放手就被拉回原車道
+    if (str) { S.lcLane = null; S.lcOn = false; S.lcHold = 0.7; }
+    else if (laneCenter && (S.lcHold = (S.lcHold || 0) - dt) <= 0) { const c = laneCenterSteer(maxSteer); if (c != null) str = c; }
     else S.lcOn = false;
   }
   // 手動方向燈: 方向盤轉過再回正後自動熄燈 (自動駕駛時保留到路口轉彎)
@@ -463,8 +507,10 @@ function update(dt) {
   S.thr = thr; S.brk = brk;
   // 縱向 (依車種: 加速度、極速、煞車)
   let a = 0;
-  const vmax = vt.vmax * 1.2 * (boost ? 1.3 : 1);
-  const A0 = 5.5 * (vt.acc / 1.5);
+  // 馬力加大 (舊版 5.5)；Shift 加速只加推力，極速一樣封頂 200 km/h
+  const vmax = vTop();
+  const A0 = 8.0 * (vt.acc / 1.5) * (boost ? 1.35 : 1);
+  const drag = (v) => 0.00042 * v * Math.abs(v) + 0.12 * Math.sign(v);
   const cvt = S.vtype === 'scooter';
   S.shiftT = Math.max(0, (S.shiftT || 0) - dt);
   if (S.manual && !cvt && !autopilot && S.v >= -0.3) {
@@ -476,7 +522,8 @@ function update(dt) {
     if (!thr && !slip && S.v > 1) a -= 0.25 + 0.9 * (S.rpm / RPM_MAX) * Math.sqrt(gk);
     if (wr > RPM_MAX + 200 && S.v > 0) a -= (wr - RPM_MAX) / 400;   // 超轉: 引擎拖住
   } else {
-    if (thr) a += A0 * thr * (1 - Math.max(S.v, 0) / vmax);
+    // 推力在極速前抵掉風阻 + 滾動阻力，平路剛好跑到 vmax
+    if (thr) { const u = Math.max(S.v, 0) / vmax; a += thr * Math.max(0, A0 * (1 - u * u) + (u < 1 ? drag(Math.max(S.v, 0)) : 0)); }
     // 自排換檔點: 油門越深越晚換 (引擎聲、轉速表用)
     if (!cvt) {
       const up = 2600 + thr * 2400;
@@ -488,9 +535,10 @@ function update(dt) {
   const wet = 1 - 0.22 * WEATHER.wet.value;   // 濕地煞車距離變長
   if (brk) a += S.v > 0.5 ? -(big ? 7 : 10) * brk * wet : -3.5 * brk;
   if (keys.Space) a += S.v > 0 ? -8 * wet : (S.v < 0 ? 8 : 0);
-  a -= 0.00042 * S.v * Math.abs(S.v) + 0.12 * Math.sign(S.v);
+  a -= drag(S.v);
   a -= 9.81 * Math.sin(S.pitch) * 0.9;
   S.v += a * dt;
+  if (S.v > vmax) S.v -= (S.v - vmax) * Math.min(1, dt * 2);   // 極速封頂 (下坡也不會一直加速)
   if (autopilot && S.v < 0) S.v = 0;   // 自動駕駛在車陣裡停住時踩煞車，不能變成倒車
   if (!thr && !brk && Math.abs(S.v) < 0.15) S.v = 0;
   S.braking = !!(brk && S.v > 0.5) || !!keys.Space;
@@ -502,8 +550,10 @@ function update(dt) {
   S.h += yawRate * dt;
   // 平面移動 + 路緣碰撞
   let nx = S.x + Math.cos(S.h) * S.v * dt, ny = S.y + Math.sin(S.h) * S.v * dt;
-  let r = roadAt(nx, ny, S.z, MARGIN);
-  if (!r && S.road && S.road.w.city) r = roadAt(nx, ny, S.z, 0.3);   // 一般道路沒有護欄: 大車可以壓到路緣
+  const pref = S.road && S.road.w;
+  let r = roadAt(nx, ny, S.z, MARGIN, 1.3, pref, true);
+  if (!r && S.road && S.road.w.city) r = roadAt(nx, ny, S.z, 0.3, 1.3, pref, true);   // 一般道路沒有護欄: 大車可以壓到路緣
+  if (!r) r = bodyOnRoads(nx, ny, S.h, pref);   // 分合流: 車身跨在主線和匝道兩條路面上也算在路上
   // 國道中央護欄: 不能開到對向路面，車身也不能壓進護欄 (資料裡兩條路面重疊的地方特別要擋)
   if (r && S.road && !r.w.city && !S.road.w.city) {
     const cw = S.road.w;
@@ -511,16 +561,25 @@ function update(dt) {
     else if (r.w.pair && r.w.pair[r.i] && r.lat + (MARGIN - 0.35) > r.w.bc[r.i] - BAR_HALF) r = null;
   }
   if (!r && S.road) {
+    S.hits = (S.hits || 0) + 1;   // 測試統計: 撞路緣 / 護欄次數
     const tx = S.road.tx, ty = S.road.ty;
     const sgn = Math.cos(S.h) * tx + Math.sin(S.h) * ty >= 0 ? 1 : -1;
     const vtan = S.v * (Math.cos(S.h) * tx * sgn + Math.sin(S.h) * ty * sgn);
-    S.v = vtan * 0.92;
+    // 擦護欄: 只留沿路方向的速度，再加一點摩擦 (依時間算；舊版每個物理步 ×0.92，120 Hz 下擦一下就停死)
+    S.v = vtan * Math.exp(-dt * 0.8);
     const th = Math.atan2(ty * sgn, tx * sgn);
-    S.h += Math.atan2(Math.sin(th - S.h), Math.cos(th - S.h)) * 0.25;
-    const lat = S.road.lat, push = -Math.sign(lat) * 0.05;
+    S.h += Math.atan2(Math.sin(th - S.h), Math.cos(th - S.h)) * (1 - Math.exp(-dt * 10));
+    const lat = S.road.lat, push = -Math.sign(lat) * 1.5 * dt;
     nx = S.x + tx * sgn * S.v * dt + (-ty) * push; ny = S.y + ty * sgn * S.v * dt + tx * push;
-    r = roadAt(nx, ny, S.z, MARGIN);
-    if (!r) { nx = S.x; ny = S.y; r = S.road; S.v *= 0.5; }
+    // 橫向夾回可行駛範圍內 (舊版只推 5 cm，窄匝道上會卡在牆邊不動)
+    {
+      const w = S.road.w, i = S.road.i, ax = w.P[i * 3], ay = w.P[i * 3 + 1];
+      const ln = (nx - ax) * -ty + (ny - ay) * tx;
+      const lim = ln > 0 ? Math.max(0, w.hw + (w.eL ? w.eL[i] : 0) - MARGIN - 0.03) : -Math.max(0, w.hw + (w.eR ? w.eR[i] : 0) - MARGIN - 0.03);
+      if (Math.abs(ln) > Math.abs(lim)) { const d = lim - ln; nx += -ty * d; ny += tx * d; }
+    }
+    r = roadAt(nx, ny, S.z, MARGIN, 1.3, pref, true) || bodyOnRoads(nx, ny, S.h, pref);
+    if (!r) { nx = S.x; ny = S.y; r = S.road; S.v *= Math.exp(-dt * 6); }
   }
   if (r) { S.x = nx; S.y = ny; S.road = r; }
   // 伸縮縫: 前輪、後輪各自壓過時「叩」一聲，車身輕彈
@@ -746,7 +805,7 @@ window.addEventListener('resize', () => {
 
 // ---- 給擴充模組 (features.js: 車流、電台、看板) 用的介面
 Object.assign(TW, { S, setVehicle, spawn, ORIGIN: INDEX.origin_twd97, keys, roadLabel, toast, toggleMenu,
-  toggleManual, shift, toggleCruise, respawnNearest, SPAWNS: () => SPAWNS, MAP_PX: 200 });
+  toggleManual, shift, toggleCruise, respawnNearest, SPAWNS: () => SPAWNS, MAP_PX: 200, update });
 Object.defineProperties(TW, {
   camMode: { get() { return camMode; }, configurable: true },
   autopilot: { get() { return autopilot; }, set(v) { autopilot = !!v; }, configurable: true },

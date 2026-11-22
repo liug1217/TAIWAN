@@ -146,12 +146,15 @@ function ingestDetail(buf) {
 }
 // 匝道接主線 (scripts/fix_clip.mjs): 匝道端點已移到主線外側，記錄 [匝道 gid, 端點, 在主線哪一側, 主線 gid, 原本重合的主線點]。
 // 兩條路都載入後在路網上接起來，並讓匝道知道要畫槽化區
+/** 主線 gid -> [{ mi 分岔點, gid 匝道 }] (出口預告牌用) */
+const DIVERGE = new Map();
 function resolveRamps() {
   for (let j = RAMP_PENDING.length - 1; j >= 0; j--) {
     const [gid, e, side, mgid, mi] = RAMP_PENDING[j];
     const w = wayByGid(gid), m = wayByGid(mgid);
     if (!w || !m) continue;
-    (w.ramps ||= []).push({ e, side, mgid });
+    (w.ramps ||= []).push({ e, side, mgid, mi });
+    if (e === 0 && mi >= 0) { let a = DIVERGE.get(mgid); if (!a) DIVERGE.set(mgid, a = []); a.push({ mi, gid }); }   // 出口: 主線 mgid 第 mi 點分出匝道
     if (mi >= 0 && mi < m.n) {
       const add = (key, k, i) => { let a = PT_INDEX.get(key); if (!a) PT_INDEX.set(key, a = []); if (!a.some(([kk, ii]) => kk === k && ii === i)) a.push([k, i]); };
       add(ptKey(w.P[e * 3], w.P[e * 3 + 1]), m.k, mi);
@@ -163,25 +166,36 @@ function resolveRamps() {
 
 /** 找 (x,y) 處、高度不高於 zRef+climb 的最高路面。margin: 距路緣保留寬度。
  *  國道主線兩側有多鋪的路肩 (w.eL / w.eR，見 setupShoulders)，左右邊界逐點不同 */
-function roadAt(x, y, zRef, margin, climb = 1.3) {
+/** wedge: 玩家物理用。國道路段在分岔處結束時，路面往前多延伸 WEDGE m、寬度漸縮到 0 (漏斗)：
+ *  OSM 車道數在分岔點常對不起來 (3 線分成 1 + 1)，外側車道前面是洞，沒有漏斗會撞上一面看不見的平牆 */
+const WEDGE = 20;
+function roadAt(x, y, zRef, margin, climb = 1.3, prefer = null, wedge = false) {
   const a = GRID.get(cellKey(Math.floor(x / CELL), Math.floor(y / CELL)));
   if (!a) return null;
-  let best = null;
+  let best = null, bp = null;
   for (let q = 0; q < a.length; q += 2) {
     const w = WAYS[a[q]], i = a[q + 1], P = w.P;
     const ax = P[i * 3], ay = P[i * 3 + 1], az = P[i * 3 + 2];
     const dx = P[i * 3 + 3] - ax, dy = P[i * 3 + 4] - ay, L = Math.hypot(dx, dy);
     if (L < 1e-3) continue;
     const t = ((x - ax) * dx + (y - ay) * dy) / (L * L), ext = 1.5 / L;
-    if (t < -ext || t > 1 + ext) continue;
+    const wx = wedge && !w.city && i === w.n - 2 ? WEDGE / L : 0;
+    if (t < -ext || t > 1 + Math.max(ext, wx)) continue;
     const lat = ((x - ax) * -dy + (y - ay) * dx) / L, tc = Math.min(Math.max(t, 0), 1);
-    if (w.eL) {
+    if (wx && t > 1 + ext) {   // 漏斗段
+      const k = 1 - (t - 1) * L / WEDGE;
+      if (Math.abs(lat) > (w.hw + (lat > 0 ? (w.eL ? w.eL[i + 1] : 0) : (w.eR ? w.eR[i + 1] : 0))) * k - margin) continue;
+    } else if (w.eL) {
       if (lat > w.hw + w.eL[i] + (w.eL[i + 1] - w.eL[i]) * tc - margin || -lat > w.hw + w.eR[i] + (w.eR[i + 1] - w.eR[i]) * tc - margin) continue;
     } else if (Math.abs(lat) > w.hw - margin) continue;
     const z = az + (P[i * 3 + 5] - az) * tc;
     if (z > zRef + climb) continue;
-    if (!best || z > best.z) best = { z, w, i, t: tc, lat, tx: dx / L, ty: dy / L };
+    const c = { z, w, i, t: tc, lat, tx: dx / L, ty: dy / L };
+    if (!best || z > best.z) best = c;
+    if (w === prefer && (!bp || z > bp.z)) bp = c;
   }
+  // 分合流處兩條路面同高重疊: 留在原本那條路 (不然「目前道路」來回跳，車道置中會亂拉)
+  if (bp && best.z - bp.z < 0.6) return bp;
   return best;
 }
 /** (x, y) 這個 40 m 格子裡有沒有一般道路 (判斷國道旁邊是不是市區用) */
@@ -362,7 +376,7 @@ const nextWay = (w) => { const o = chooseNext(w, w.n - 1, 1, 0); return o ? [o.o
 
 window.TW = Object.assign(window.TW || {}, {
   T, params, $, setStatus, HOOKS, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16,
-  LANE_W, WAYS, GID, wayByGid, ptKey, PT_INDEX, CELL, GRID, cellKey, ingestDetail, resolveRamps,
+  LANE_W, WAYS, GID, wayByGid, ptKey, PT_INDEX, CELL, GRID, cellKey, ingestDetail, resolveRamps, DIVERGE,
   roadAt, cityAt, TERR, LCLS, landcoverAt, terrainAt,
   BARRIER_INSET, BAR_HALF, isFwyMain, setupShoulders, leftPost, rightEdge, leftEdge,
   laneCount, laneOffDir, speedLimit, nodeLinks, nextOptions, deadEndAhead, chooseNext, nextWay,

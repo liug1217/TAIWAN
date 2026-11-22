@@ -191,7 +191,7 @@ def main():
                         name=jname or name or dz[0], ref=jref, dz=dz[:3], den=den[:3], shields=dref[:3],
                         road=ways[M]["ref"], mp=mp)
 
-    # 直行方向: 下游接下來兩個交流道的名稱
+    # 直行方向: 下游接下來三個交流道的名稱
     by_start = {}
     for S, e in exits.items():
         by_start.setdefault(e["main"], []).append(e)
@@ -210,7 +210,7 @@ def main():
                 if n and n not in seen_names:
                     seen_names.add(n)
                     thru.append([n, en_of(n)])
-                    if len(thru) == 2:
+                    if len(thru) == 3:   # 網頁: 路寬 (4 線以上) 放 3 面直行牌，否則取最近 2 個
                         break
             nxt = [k for k in starts.get(key(*P[-1][:2]), []) if not is_link(k)]
             if not nxt:

@@ -10,7 +10,7 @@
 (function () {
 'use strict';
 const { T, params, setStatus, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16, WAYS, PT_INDEX, ptKey, CELL, GRID, cellKey,
-  ingestDetail, roadAt, TERR, LCLS, landcoverAt, terrainAt, cityAt, HOOKS, BARRIER_INSET, setupShoulders, rightEdge } = TW;
+  ingestDetail, roadAt, TERR, LCLS, landcoverAt, terrainAt, cityAt, HOOKS, BARRIER_INSET, setupShoulders, rightEdge, nextOptions, DIVERGE } = TW;
 const { renderer, MOBILE, scene, GLOW_LAMP, patch, TERRAIN_SPEC,
   matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, matAsphalt, matConcrete, matBarrier, matGore,
   matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber,
@@ -88,6 +88,7 @@ const CATS = {
   drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matSoundPost, 1, 1, 'prop'],
   tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
   lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
+  kmface: ['uv', () => matKm(), 0, 1, 'prop'], exitface: ['uv', () => matExit(), 0, 1, 'mid'],
   tcab: ['', () => matCabinet, 0, 1, 'fine'], reflBlack: ['', () => matReflBlack, 0, 1, 'fine'], reflFace: ['uv', () => matRetro, 0, 0, 'fine'],
 };
 const KIND_R = { base: 1e9, mid: MOBILE ? 2000 : 3200, prop: R_PROP, fine: R_FINE, lamp: R_LAMP };
@@ -185,6 +186,221 @@ function oPt(w, oAt, p) {
   if (OBJ_CHECK) { const d = Math.hypot(x - (p.x + nx[k] * a), y - (p.y + ny[k] * a)); OBJ_DEV.n++; if (d > 0.05) OBJ_DEV.bad++; if (d > OBJ_DEV.max) OBJ_DEV.max = d; }
   return { x, y };
 }
+// ======================================================================= 里程牌
+// 資料: extra-live wayMap (gid -> [國道, 方向, 里程]) + extra-kmposts 錨點 (scripts/build_kmposts.py)
+var KM = null, MAT_KM = null;   // var: CATS 在檔案前面就會呼叫 matKm()
+function kmData() {
+  if (KM) return KM;
+  const read = (id) => { try { const el = document.getElementById(id); return el ? JSON.parse(el.textContent) : null; } catch (e) { return null; } };
+  const live = read('extra-live'), kp = read('extra-kmposts');
+  return (KM = { map: (live && live.wayMap) || [], A: (kp && kp.anchors) || {} });
+}
+/** 把 (x, y) 投影到該國道錨點折線上: { m 里程, dist 離折線距離 } */
+function mileageAt(road, x, y, segs = null) {
+  const a = kmData().A[road];
+  if (!a || a.length < 2) return null;
+  let best = null;
+  for (const i of segs || a.keys()) {
+    if (i >= a.length - 1) continue;
+    const [m0, x0, y0] = a[i], [m1, x1, y1] = a[i + 1], dx = x1 - x0, dy = y1 - y0, L2 = dx * dx + dy * dy;
+    if (L2 < 1) continue;
+    const t = Math.min(1, Math.max(0, ((x - x0) * dx + (y - y0) * dy) / L2)), d = Math.hypot(x0 + dx * t - x, y0 + dy * t - y);
+    if (!best || d < best.dist) best = { m: m0 + (m1 - m0) * t, dist: d };
+  }
+  return best;
+}
+/** 字元圖集: 0-9 和小數點，綠底白字 (整面都是綠底，所以一個字一個四邊形拼起來就是一塊牌子) */
+var KM_CH = '0123456789.';
+function matKm() {
+  if (MAT_KM) return MAT_KM;
+  const KM_CH = '0123456789.';   // 區域常數: CATS 在檔案前面 (全域常數初始化之前) 就會呼叫這裡
+  const cw = 64, ch = 96, cv = document.createElement('canvas'); cv.width = cw * KM_CH.length; cv.height = ch;
+  const c = cv.getContext('2d');
+  c.fillStyle = '#0b6a37'; c.fillRect(0, 0, cv.width, ch);
+  c.fillStyle = '#f4f4ee'; c.font = 'bold 84px Arial, Helvetica, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  for (let i = 0; i < KM_CH.length; i++) c.fillText(KM_CH[i], cw * (i + 0.5), ch * 0.54);
+  const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace; tex.anisotropy = 4;
+  return (MAT_KM = new T.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: new T.Color(0.12, 0.12, 0.12), roughness: 0.5, side: T.DoubleSide }));
+}
+/** 一面字: 中心 (cx, cy)、牌面朝 (fx, fy) 那一側的來車看得到；文字由觀看者的左到右 */
+function kmFace(g, cx, cy, z, fx, fy, label) {
+  const wch = (c) => (c === '.' ? 0.055 : 0.1), W = [...label].reduce((s, c) => s + wch(c), 0);
+  const lx = fy, ly = -fx;   // 觀看者 (面向 -f) 的左手方向
+  let u = -W / 2;
+  for (const c of label) {
+    const j = KM_CH.indexOf(c), w = wch(c), u0 = u, u1 = u + w; u = u1;
+    if (j < 0) continue;
+    const pt = (uu, zz, tu, tv) => g.vv([cx - lx * uu, cy - ly * uu, zz, tu, tv]);
+    const a = pt(u0, z - 0.09, j / KM_CH.length, 0), b = pt(u1, z - 0.09, (j + 1) / KM_CH.length, 0);
+    const cc = pt(u1, z + 0.09, (j + 1) / KM_CH.length, 1), d = pt(u0, z + 0.09, j / KM_CH.length, 1);
+    g.q(a, b, cc, d);
+  }
+  return W;
+}
+/** 路段上每個 100 m 整數里程的位置: [{ d 沿線距離, km 里程 (m) }] */
+function kmMarks(w) {
+  const mp = kmData().map[w.gid], out = [];
+  if (!mp || w.len < 20) return out;
+  const L = w.len, A = kmData().A[mp[0]];
+  if (!A) return out;
+  // 效能: 只看路段附近 (外擴 1.5 km) 的錨點線段，不用每個取樣點掃整條國道
+  const [bx0, by0, bx1, by1] = w.bb, E = 1500, segs = [];
+  for (let i = 0; i < A.length - 1; i++) {
+    const [, x0, y0] = A[i], [, x1, y1] = A[i + 1];
+    if (Math.max(x0, x1) > bx0 - E && Math.min(x0, x1) < bx1 + E && Math.max(y0, y1) > by0 - E && Math.min(y0, y1) < by1 + E) segs.push(i);
+  }
+  if (!segs.length) return out;
+  let prev = null;
+  for (let d = 0, k = 0; d <= L + 19.99; d += 20) {
+    const dd0 = Math.min(d, L), p = along(w, dd0, k); k = p.k;
+    const r = mileageAt(mp[0], p.x, p.y, segs);
+    if (!r || r.dist > 250) { prev = null; continue; }
+    if (prev && Math.abs(r.m - prev.m) < 60) {
+      const a = Math.floor(prev.m / 100), b = Math.floor(r.m / 100);
+      if (a !== b) { const km = Math.max(a, b) * 100; out.push({ d: prev.d + (dd0 - prev.d) * (km - prev.m) / (r.m - prev.m), km }); }
+    }
+    prev = { m: r.m, d: dd0 };
+  }
+  return out;
+}
+function kmPosts(B, w, oAt, notMine, nearNotch) {
+  const { nx, ny, M } = w, pair = (k) => !!(w.pair && w.pair[k]);
+  for (const { d: dd, km } of kmMarks(w)) {
+    const q = along(w, dd), kk = q.k;
+    if (((M[kk] | M[kk + 1]) & 1) || nearNotch(dd, 3) || notMine(kk)) continue;
+    const c = oPt(w, oAt, q), tx = ny[kk], ty = -nx[kk], z = q.z, label = (km / 1000).toFixed(1);
+    box(B.g('bpole', c.x, c.y), c.x, c.y, tx, ty, 0.03, 0.03, z + 0.85, z + 1.36);
+    const W = kmFace(B.g('kmface', c.x, c.y), c.x - tx * 0.018, c.y - ty * 0.018, z + 1.5, -tx, -ty, label);
+    if (pair(kk)) kmFace(B.g('kmface', c.x, c.y), c.x + tx * 0.018, c.y + ty * 0.018, z + 1.5, tx, ty, label);   // 共用的中央護欄: 背面給對向看
+    box(B.g('glare', c.x, c.y), c.x, c.y, tx, ty, 0.014, W / 2 + 0.05, z + 1.36, z + 1.64);
+  }
+}
+/** 隧道內里程牌: 照街景，右側牆面磁磚上緣貼一塊綠底白字 (平貼牆面，面向隧道內) */
+function kmTunnel(B, w, a) {
+  const { nx, ny } = w;
+  for (const { d, km } of kmMarks(w)) {
+    const q = along(w, d), k = q.k, lat = a - 0.03;
+    const x = q.x - nx[k] * lat, y = q.y - ny[k] * lat, label = (km / 1000).toFixed(1);
+    const W = kmFace(B.g('kmface', x, y), x + nx[k] * 0.012, y + ny[k] * 0.012, q.z + 3.2, nx[k], ny[k], label);
+    box(B.g('glare', x, y), x, y, nx[k], ny[k], 0.008, W / 2 + 0.05, q.z + 3.06, q.z + 3.34);
+  }
+}
+
+// ======================================================================= 出口預告牌 (300 / 200 / 100 m)
+// 照實景: 右側路肩外一支柱子，直立綠色長牌，上面「300 m」，下面白色斜帶 3 / 2 / 1 條 (左下往右上)
+var MAT_EXIT = null;
+function matExit() {
+  if (MAT_EXIT) return MAT_EXIT;
+  const cw = 128, ch = 320, cv = document.createElement('canvas'); cv.width = cw * 3; cv.height = ch;
+  const c = cv.getContext('2d');
+  for (let j = 0; j < 3; j++) {
+    const x0 = j * cw, n = 3 - j;   // 第 0 格 300 m (3 條)、1 格 200 m、2 格 100 m
+    c.fillStyle = '#0b6a37'; c.fillRect(x0, 0, cw, ch);
+    c.strokeStyle = '#f2f2ec'; c.lineWidth = 5; c.strokeRect(x0 + 5, 5, cw - 10, ch - 10);
+    c.fillStyle = '#f2f2ec'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = 'bold 50px Arial, Helvetica, sans-serif'; c.fillText(String(n * 100), x0 + cw / 2, 46);
+    c.font = 'bold 44px Arial, Helvetica, sans-serif'; c.fillText('m', x0 + cw / 2, 92);
+    // 斜帶: 牌子下半部平均分配
+    c.save(); c.beginPath(); c.rect(x0 + 8, 120, cw - 16, ch - 128); c.clip();
+    const top = 120, span = ch - 128, band = 26;
+    for (let k = 0; k < n; k++) {
+      const yc = top + span * (k + 0.5) / n;
+      c.beginPath(); c.moveTo(x0, yc + 34); c.lineTo(x0 + cw, yc - 34); c.lineTo(x0 + cw, yc - 34 + band); c.lineTo(x0, yc + 34 + band); c.closePath(); c.fill();
+    }
+    c.restore();
+  }
+  const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace; tex.anisotropy = 4;
+  return (MAT_EXIT = new T.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: new T.Color(0.15, 0.15, 0.15), roughness: 0.5, side: T.DoubleSide }));
+}
+/** 路段 u 上的出口分岔點 (沿線距離): 匝道從中間分出 (DIVERGE) 或路段在分岔點結束 */
+function divergesOn(u) {
+  const out = [];
+  for (const d of DIVERGE.get(u.gid) || []) if (d.mi < u.n) out.push(u.s[d.mi]);
+  if (nextOptions(u, u.n - 1).some((o) => o.o.link && !o.o.city)) out.push(u.len);
+  return out;
+}
+function exitSigns(B, w) {
+  const { P, nx, ny, hw, M, s } = w;
+  if (w.len < 5) return;
+  // 前方 300 m 內的分岔點 (可能在後面接的主線上)，座標換成 w 的沿線距離
+  const list = divergesOn(w);
+  let u = w, start = w.len;
+  for (let hop = 0; hop < 4 && start < w.len + 300; hop++) {
+    const nxs = nextOptions(u, u.n - 1).filter((o) => !o.o.link && !o.o.city && o.o.oneway && o.dir > 0 && o.i === 0);
+    if (!nxs.length) break;
+    const v = (nxs.find((o) => o.o.ref && o.o.ref === w.ref) || nxs[0]).o;
+    for (const d of divergesOn(v)) if (start + d < w.len + 300) list.push(start + d);
+    start += v.len; u = v;
+  }
+  list.sort((a, b) => a - b);
+  const ds = list.filter((d, i) => i === 0 || d - list[i - 1] > 40);
+  for (const D of ds) for (const n of [3, 2, 1]) {
+    const d = D - n * 100;
+    if (d < 0 || d > w.len) continue;
+    const p = along(w, d), k = p.k;
+    if ((M[k] | M[Math.min(k + 1, w.n - 1)]) & 2) continue;   // 右邊接著別條路面 (匝道分出中)
+    const er = hw + (w.eR ? w.eR[k] : 0) + 0.55, tx = ny[k], ty = -nx[k];
+    const x = p.x - nx[k] * er, y = p.y - ny[k] * er, z = p.z;
+    box(B.g('bpole', x, y), x + tx * 0.05, y + ty * 0.05, tx, ty, 0.05, 0.05, z - 0.5, z + 1.35);
+    box(B.g('bback', x, y), x + tx * 0.012, y + ty * 0.012, tx, ty, 0.012, 0.37, z + 1.3, z + 3.1);
+    // 牌面 (朝來車；觀看者左手 = 左法向)
+    const g = B.g('exitface', x, y), fx = x - tx * 0.002, fy = y - ty * 0.002, j = 3 - n, u0 = j / 3, u1 = (j + 1) / 3;
+    const a = g.vv([fx + nx[k] * 0.35, fy + ny[k] * 0.35, z + 1.32, u0, 0]), b = g.vv([fx - nx[k] * 0.35, fy - ny[k] * 0.35, z + 1.32, u1, 0]);
+    const c2 = g.vv([fx - nx[k] * 0.35, fy - ny[k] * 0.35, z + 3.08, u1, 1]), e = g.vv([fx + nx[k] * 0.35, fy + ny[k] * 0.35, z + 3.08, u0, 1]);
+    g.q(a, b, c2, e);
+  }
+}
+
+// ======================================================================= 路燈 (精細模型)
+/** 管子: 沿 pts ([x, y, z] 資料座標) 掃一個圓斷面，rs[i] 每點半徑 */
+function tube(g, pts, rs, seg = 8) {
+  const n = pts.length, b = g.n;
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], c = pts[Math.min(n - 1, i + 1)];
+    let tx = c[0] - a[0], ty = c[1] - a[1], tz = c[2] - a[2]; const L = Math.hypot(tx, ty, tz) || 1; tx /= L; ty /= L; tz /= L;
+    // 參考軸: 管子接近垂直時用 x 軸，否則用上方
+    let rx = 0, ry = 0, rz = 1; if (Math.abs(tz) > 0.9) { rx = 1; rz = 0; }
+    let ux = ty * rz - tz * ry, uy = tz * rx - tx * rz, uz = tx * ry - ty * rx; const U = Math.hypot(ux, uy, uz) || 1; ux /= U; uy /= U; uz /= U;
+    const vx = ty * uz - tz * uy, vy = tz * ux - tx * uz, vz = tx * uy - ty * ux;
+    for (let j = 0; j < seg; j++) {
+      const t = j / seg * Math.PI * 2, cs = Math.cos(t) * rs[i], sn = Math.sin(t) * rs[i];
+      g.v(pts[i][0] + ux * cs + vx * sn, pts[i][1] + uy * cs + vy * sn, pts[i][2] + uz * cs + vz * sn);
+    }
+  }
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < seg; j++) {
+    const j1 = (j + 1) % seg;
+    g.q(b + i * seg + j, b + i * seg + j1, b + (i + 1) * seg + j1, b + (i + 1) * seg + j);
+  }
+  const top = g.v(...pts[n - 1]);   // 頂端封口
+  for (let j = 0; j < seg; j++) g.i.push(b + (n - 1) * seg + j, b + (n - 1) * seg + (j + 1) % seg, top);
+}
+/** 國道路燈 (照街景): 護欄頂上的底座法蘭 + 錐形燈桿 (約 10 m)，頂端分出燈臂，順著圓弧從垂直彎成近水平、末端微微上揚，
+ *  掛扁平的燈具 (燈罩朝下)。arms: 每支燈臂伸出的水平方向 [[ax, ay], ...] (單臂 1 支、Y 形 2 支) */
+function lampPost(B, x, y, z0, arms) {
+  const lp = B.g('lampPole', x, y), lh = B.g('lampHead', x, y);
+  const H = 9.6, single = arms.length === 1;
+  box(lp, x, y, 1, 0, 0.2, 0.2, z0, z0 + 0.04);                                          // 底座法蘭 (鎖在護欄頂)
+  for (const [bx, by] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) box(lp, x + bx * 0.14, y + by * 0.14, 1, 0, 0.018, 0.018, z0 + 0.04, z0 + 0.1);   // 螺栓
+  tube(lp, [[x, y, z0 + 0.03], [x, y, z0 + 0.35]], [0.16, 0.12], 8);                     // 根部護套
+  const pole = [], pr = [];
+  for (let i = 0; i <= 2; i++) { const f = i / 2; pole.push([x, y, z0 + 0.3 + (H - 0.3) * f]); pr.push(0.115 - 0.045 * f); }   // 錐形直桿: 3 圈就夠
+  tube(lp, pole, pr, 8);
+  const R = single ? 2.7 : 1.8, A = single ? 1.35 : 1.25, ext = single ? 1.3 : 0.9;     // 彎曲半徑、彎到幾度 (rad, 從垂直量)、末端直段
+  for (const [ax, ay] of arms) {
+    const pts = [], rs = [];
+    const sx = x + (single ? 0 : ax * 0.06), sy = y + (single ? 0 : ay * 0.06), sz = z0 + H - (single ? 0.1 : 0.6);
+    for (let i = 0; i <= 8; i++) { const t = A * i / 8; pts.push([sx + ax * R * (1 - Math.cos(t)), sy + ay * R * (1 - Math.cos(t)), sz + R * Math.sin(t)]); rs.push(0.07 - 0.02 * i / 8); }
+    const e = pts[pts.length - 1], dx = Math.sin(A), dz = Math.cos(A);
+    pts.push([e[0] + ax * dx * ext, e[1] + ay * dx * ext, e[2] + dz * ext]); rs.push(0.05);
+    tube(lp, pts, rs, 6);
+    // 燈具: 扁平長橢圓 (沿燈臂方向)，末端略往下
+    const hx = pts[pts.length - 1][0] + ax * 0.35, hy = pts[pts.length - 1][1] + ay * 0.35, hz = pts[pts.length - 1][2] + 0.02;
+    box(lh, hx, hy, ax, ay, 0.42, 0.17, hz - 0.1, hz + 0.06);
+    box(lh, hx + ax * 0.05, hy + ay * 0.05, ax, ay, 0.3, 0.12, hz - 0.16, hz - 0.1);   // 燈罩
+    B.chunk(x, y, SUB_P).glows.push(hx, hz - 0.2, -hy);
+  }
+}
+
 /** 國道外側路邊設施: 市區段的隔音牆 (實心綠色板、下段深綠上段淺綠、4 m 一根柱子) 與約每 1.2 km 一面廣告看板 */
 function roadside(B, w, oAt, inward) {
   const { nx, ny, hw, M } = w, L = w.len;
@@ -373,32 +589,36 @@ function addRoad(B, w) {
         if (skip) continue;
         const q = oPt(w, oAt, p), x = q.x, y = q.y, a = 0.21;   // 板面轉 12°
         const tx = ny[k] * Math.cos(a) + nx[k] * Math.sin(a), ty = -nx[k] * Math.cos(a) + ny[k] * Math.sin(a), g = B.g('glare', x, y);
-        box(g, x, y, tx, ty, 0.022, 0.12, p.z + 0.84, p.z + 1.55);
+        box(g, x, y, tx, ty, 0.022, 0.2, p.z + 0.84, p.z + 1.72);   // 照街景: 板寬約 0.4 m、頂端離路面約 1.7 m
         box(g, x, y, ny[k], -nx[k], 0.03, 0.03, p.z + 0.8, p.z + 0.9);   // 底座
       }
     }
+    // 里程牌: 中央分隔帶每 100 m 一支 (綠底白字公里數)
+    if (bit === 1 && !w.link && w.oneway && !params.has('nokm')) kmPosts(B, w, oAt, notMine, nearNotch);
     // 隔音牆 + 廣告看板: 國道主線外側
     if (bit === 2 && !w.link && w.oneway && !params.has('nowall')) roadside(B, w, oAt, inward);
-    // 路燈: 中央分隔島每 40 m 一支雙臂燈
+    // 出口預告牌: 出口前 300 / 200 / 100 m (右側路肩外)
+    if (bit === 2 && !w.link && w.oneway && !w.tunnel && !params.has('noexitsign')) exitSigns(B, w);
+    // 路燈 (照街景): 共用的中央分隔護欄上每 40 m 一支 Y 形雙臂燈；國道主線沒有對向 (單向高架) 改在右側護欄上立單臂燈，燈臂彎過路面
     if (bit === 1 && !w.link && w.oneway && !params.has('nolamps')) {
       for (let d = 2, k = 0; d < s[n - 1]; d += 40) {
         const p = along(w, d, k); k = p.k;
-        if ((M[k] | M[k + 1]) & bit) continue;
         if (nearNotch(d, 3.5)) continue;   // 跟門架立柱撞在一起
+        const single = !!w.bc && !PR(k);
+        if (single) {
+          if ((M[k] | M[k + 1]) & 2) continue;
+          const o = -(hw + ER(k)) + BARRIER_INSET;
+          lampPost(B, p.x + nx[k] * o, p.y + ny[k] * o, p.z + 0.87, [[nx[k], ny[k]]]);
+          continue;
+        }
+        if ((M[k] | M[k + 1]) & bit) continue;
         if (w.bc) { if (notMine(k)) continue; }
         else {
           const pr = roadAt(p.x + nx[k] * (hw + 1.6), p.y + ny[k] * (hw + 1.6), p.z, 0, 1.5);
           if (pr && pr.w !== w && !pr.w.city && Math.abs(pr.z - p.z) < 1.5 && pr.tx * ny[k] + pr.ty * -nx[k] < -0.8 && pr.w.gid < w.gid) continue;
         }
-        const q = oPt(w, oAt, p), x = q.x, y = q.y, z = p.z;
-        const lp = B.g('lampPole', x, y), lh = B.g('lampHead', x, y);
-        box(lp, x, y, ny[k], -nx[k], 0.09, 0.09, z + 0.85, z + 10.5);
-        box(lp, x, y, ny[k], -nx[k], 0.05, 2.0, z + 10.3, z + 10.42);
-        for (const sd of [-1, 1]) {
-          const lx = x + nx[k] * sd * 1.9, ly = y + ny[k] * sd * 1.9;
-          box(lh, lx, ly, ny[k], -nx[k], 0.32, 0.16, z + 10.12, z + 10.3);
-          B.chunk(x, y, SUB_P).glows.push(lx, z + 10.05, -ly);
-        }
+        const q = oPt(w, oAt, p);
+        lampPost(B, q.x, q.y, p.z + 0.87, [[nx[k], ny[k]], [-nx[k], -ny[k]]]);
       }
     }
     // 反光片: 外側護欄每 24 m 一支 (黃色圓形稜鏡反光片)，反光面朝來車
@@ -618,6 +838,43 @@ function addTunnel(B, w) {
     }
   }
   for (const i of [0, n - 1]) if (isTunnelEnd(w, i)) B.chunk(P[i * 3], P[i * 3 + 1]).extra.push(portalMesh(w, i));
+  if (!params.has('nokm')) kmTunnel(B, w, a);
+  if (w.oneway && !w.link && isTunnelEnd(w, 0)) { const m = tunnelSign(w); if (m) B.chunk(m.userData.x, m.userData.y).extra.push(m); }
+}
+/** 隧道入口前的白色名牌 (照國道 3 號街景「安坑隧道 長 455 公尺」): 洞口前 40 m、右側路肩外、兩支柱子 */
+function tunnelSign(w) {
+  const { P, nx, ny, hw } = w;
+  // 隧道全長: 接著往前走同一條國道的隧道路段
+  let len = w.len, u = w;
+  for (let hop = 0; hop < 12; hop++) {
+    const nxo = nextOptions(u, u.n - 1).find((o) => o.o.tunnel && !o.o.link && o.dir > 0 && o.i === 0 && (!w.ref || o.o.ref === w.ref));
+    if (!nxo || nxo.o === w) break;
+    u = nxo.o; len += u.len;
+  }
+  const name = /隧道/.test(w.name || '') ? w.name.replace(/.*?([^\s／/]*隧道).*/, '$1') : '隧道';
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256;
+  const c = cv.getContext('2d');
+  c.fillStyle = '#ecece6'; c.fillRect(0, 0, 512, 256);
+  c.strokeStyle = '#2a2a2a'; c.lineWidth = 6; c.strokeRect(10, 10, 492, 236);
+  c.fillStyle = '#1a1a1a'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = `bold ${name.length > 5 ? 64 : 84}px "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif`;
+  c.fillText(name.split('').join(name.length > 5 ? '' : ' '), 256, 92);
+  c.font = 'bold 50px "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif';
+  c.fillText(`長  ${Math.round(len)}  公尺`, 256, 188);
+  const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace; tex.anisotropy = 4;
+  const tx = w.ny[0], ty = -w.nx[0], back = 40, lat = hw + (w.eR ? w.eR[0] : 0) + 4;
+  const x = P[0] - tx * back - nx[0] * lat, y = P[1] - ty * back - ny[0] * lat, z = P[2];
+  const grp = new T.Group();
+  const face = new GB('uv'), plate = new GB(), posts = new GB();
+  const W = 1.3, z0 = z + 1.9, z1 = z + 3.2, fx = x - tx * 0.03, fy = y - ty * 0.03;
+  const v = (sx, zz, uu, vv) => face.vv([fx + nx[0] * sx, fy + ny[0] * sx, zz, uu, vv]);
+  face.q(v(W, z0, 0, 0), v(-W, z0, 1, 0), v(-W, z1, 1, 1), v(W, z1, 0, 1));
+  box(plate, x, y, tx, ty, 0.025, W + 0.02, z0 - 0.02, z1 + 0.02);
+  for (const sd of [-0.8, 0.8]) box(posts, x + nx[0] * sd + tx * 0.06, y + ny[0] * sd + ty * 0.06, tx, ty, 0.045, 0.045, z - 1.5, z0);
+  const fm = withUv(face.mesh(new T.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: new T.Color(0.2, 0.2, 0.2), roughness: 0.6, side: T.DoubleSide })));   // 跟廣告看板同一種著色器組合: 不會第一次出現才編譯 (卡頓)
+  for (const m of [fm, plate.mesh(matBillboardBack, { cast: true }), posts.mesh(matLampPole, { cast: true })]) if (m) grp.add(m);
+  grp.userData = { x, y };
+  return grp;
 }
 /** 隧道洞口 (照國道 3 號街景): 外凸的拱形遮罩、上方弧形鐵欄杆、兩側白底彩色波浪擋土牆 */
 function portalMesh(w, i) {
@@ -913,8 +1170,9 @@ function* buildTile(rec) {
       const [, mat, cast, recv, kind] = CATS[cat];
       let m = gb.mesh(mat(), { cast: false, receive: !!recv });
       if (!m) continue;
-      if (cat === 'bboard') withUv(m);
+      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface') withUv(m);
       g.add(m); ch.meshes.push(m); ch.kinds.push(kind); ch.casts.push(!!cast);
+      yield;   // 每個網格 (算法向量、建緩衝) 分開做，不要一個小塊全部擠在同一幀 (卡頓)
     }
     if (c.glows.length) {
       const pg = new T.BufferGeometry(); pg.setAttribute('position', new T.Float32BufferAttribute(c.glows, 3)); pg.computeBoundingSphere();

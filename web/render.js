@@ -549,6 +549,9 @@ const matTunnelWall = patch(new T.MeshStandardMaterial({ roughness: 0.75, metaln
       float jx = abs(fract(s / 2.4 + 0.5) - 0.5) * 2.4, jy = abs(fract((h - 0.3) / 0.65 + 0.5) - 0.5) * 0.65;
       c *= mix(0.72, 1.0, smoothstep(0.012, 0.012 + fw * 1.5, min(jx, jy)));
       c *= mix(0.75, 1.0, smoothstep(0.3, 0.9, h));                                                  // 底部較髒
+      // 綠色腰帶 (照街景: 磁磚牆下段一條深綠橫帶)
+      float band = smoothstep(0.78, 0.78 + fw * 2.0, h) * (1.0 - smoothstep(1.12, 1.12 + fw * 2.0, h));
+      c = mix(c, vec3(0.05, 0.3, 0.13) * (0.9 + 0.15 * n), band);
       gLit = 0.5 + 0.15 * smoothstep(1.5, 2.9, h);
     } else {                                                                                       // 拱頂混凝土
       c = vec3(0.16, 0.155, 0.15) * (0.75 + 0.45 * n);

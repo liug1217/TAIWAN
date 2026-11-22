@@ -1175,8 +1175,9 @@ function drawArrow(x, cx, cy, size, ang) {
   const P = size * SGN.px;
   x.save(); x.translate(cx, cy); x.rotate(ang);
   x.fillStyle = '#ffffff'; x.beginPath();
-  x.moveTo(0, -P * 0.5); x.lineTo(P * 0.32, -P * 0.12); x.lineTo(P * 0.1, -P * 0.12); x.lineTo(P * 0.1, P * 0.5);
-  x.lineTo(-P * 0.1, P * 0.5); x.lineTo(-P * 0.1, -P * 0.12); x.lineTo(-P * 0.32, -P * 0.12); x.closePath(); x.fill();
+  // 照實景: 三角形箭頭頭部寬大、箭桿短而粗
+  x.moveTo(0, -P * 0.5); x.lineTo(P * 0.4, -P * 0.04); x.lineTo(P * 0.13, -P * 0.04); x.lineTo(P * 0.13, P * 0.45);
+  x.lineTo(-P * 0.13, P * 0.45); x.lineTo(-P * 0.13, -P * 0.04); x.lineTo(-P * 0.4, -P * 0.04); x.closePath(); x.fill();
   x.restore();
 }
 function panelBase(wM, hM, bg = SGN.green, border = '#ffffff') {
@@ -1222,7 +1223,7 @@ function exitPanel(gd) {
     for (const r of groupSh) { drawShield(x, r, (sx + shieldW(r) / 2) * P, (oy + S.pad) * P); sx += shieldW(r) + 0.15; }
   }
   const ay = H - S.pad * 0.7 - S.arrow / 2, R = gd.side !== 'L';
-  drawArrow(x, (n === 1 ? W / 2 + (R ? 1 : -1) * 0.9 : (R ? W - S.pad - 0.5 : S.pad + 0.5)) * P, ay * P, S.arrow, R ? Math.PI / 4 : -Math.PI / 4);
+  drawArrow(x, (n === 1 ? W / 2 + (R ? 1 : -1) * 0.25 : (R ? W - S.pad - 0.6 : S.pad + 0.6)) * P, ay * P, S.arrow * 1.1, R ? Math.PI / 4 : -Math.PI / 4);   // 照實景: 斜箭頭在牌子下方中間偏出口側
   return p;
 }
 function thruPanel([zh, en]) {
@@ -1236,16 +1237,24 @@ function thruPanel([zh, en]) {
   drawArrow(x, W / 2 * P, (H - S.pad * 0.7 - S.arrow / 2) * P, S.arrow, 0);
   return p;
 }
+/** 出口編號牌 (照實景「25B 台北」): 橘黃底、外圈黑框、黑字；編號用粗體英數字、地名中文，直接貼在綠色出口牌上緣 */
 function exitTab(gd) {
-  const text = gd.ref + ' ' + gd.name, S = SGN, h = 0.55;
-  mctx.font = '700 ' + Math.round(0.4 * S.px) + 'px ' + ZH_FONT;
-  const W = mctx.measureText(text).width / S.px + 0.36;
-  const p = panelBase(W, h, '#f2b705', '#f2b705'), x = p.x;
-  x.fillStyle = '#111111'; x.font = mctx.font; x.textBaseline = 'middle'; x.fillText(text, W / 2 * S.px, h / 2 * S.px + 1);
-  return p;
+  const S = SGN, P = S.px, h = 0.5, nf = '700 ' + Math.round(0.4 * P) + 'px ' + EN_FONT, zf = '700 ' + Math.round(0.34 * P) + 'px ' + ZH_FONT;
+  mctx.font = nf; const wn = mctx.measureText(gd.ref).width / P;
+  mctx.font = zf; const wz = gd.name ? mctx.measureText(gd.name).width / P : 0;
+  const W = wn + (wz ? wz + 0.14 : 0) + 0.34, cv = document.createElement('canvas');
+  cv.width = Math.ceil(W * P); cv.height = Math.ceil(h * P);
+  const x = cv.getContext('2d');
+  x.fillStyle = '#111111'; x.fillRect(0, 0, cv.width, cv.height);                       // 黑框
+  const b = 0.035 * P; x.fillStyle = '#f5a31a'; x.fillRect(b, b, cv.width - 2 * b, cv.height - 2 * b);
+  x.fillStyle = '#111111'; x.textBaseline = 'middle'; x.textAlign = 'left';
+  let px = 0.17 * P;
+  x.font = nf; x.fillText(gd.ref, px, cv.height / 2 + 2); px += (wn + 0.14) * P;
+  if (wz) { x.font = zf; x.fillText(gd.name, px, cv.height / 2 + 2); }
+  return { cv, x, w: W, h };
 }
 function signMat(cv) {
-  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 8;
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 4;
   // 反光標誌: 有日照明暗，再加一點自發光讓背光面也讀得到
   return new T.MeshStandardMaterial({ map: t, emissiveMap: t, emissive: new T.Color(0.32, 0.32, 0.32), roughness: 0.55, metalness: 0 });
 }
@@ -1255,7 +1264,8 @@ function buildGuide(gd) {
   // 照實景: 中央立柱在中央護欄上、外側立柱在護欄外；: 牌面下緣約 5.8 m、桁架高 2.3 m 藏在牌面後面、柱距 (沿路) 1.4 m
   const [XL, XR] = gantryX(w, gd.idx), H = 5.95, TH = 2.3, TZ = 0.75;
   const root = new T.Group(), steel = trussGroup(XL, XR, H, TH, { tz: TZ, cz: 1.2 });
-  const ex = exitPanel(gd), th = gd.thru.map(thruPanel), tab = gd.ref ? exitTab(gd) : null, R = gd.side !== 'L';
+  // 路寬 4 線以上放 3 面直行牌 (資料是遠的在左)，否則取最近的 2 個
+  const ex = exitPanel(gd), th = (w.lanes >= 4 ? gd.thru : gd.thru.slice(-2)).map(thruPanel), tab = gd.ref ? exitTab(gd) : null, R = gd.side !== 'L';
   // ---- 牌面對準車道: 出口牌在出口那一側最外車道正上方，直行牌平均排在其餘車道上方
   const nL = Math.max(1, w.lanes), ls = w.ls || 0, laneX = (f) => LANE_W * (f + 0.5) - w.hw + ls;   // 車道 f (0 = 最左) 中心的本地 x
   const m = th.length, rest = Math.max(1, nL - 1);
@@ -1278,7 +1288,7 @@ function buildGuide(gd) {
   for (const it of items) put(it.p, it.l + it.w / 2, yB, it.w, it.h);   // 下緣對齊 (照實景)
   if (tab) {
     const tw = tab.w * s, thh = tab.h * s, e = exItem;
-    put(tab, R ? e.l + e.w - tw / 2 : e.l + tw / 2, yB + e.h + 0.06, tw, thh);
+    put(tab, R ? e.l + e.w - tw / 2 : e.l + tw / 2, yB + e.h - 0.01, tw, thh);   // 貼在出口牌上緣 (不留縫)
   }
   catwalk(steel, XL + 0.35, XR - 0.3, yB - 0.1, TZ, Z + 0.85, H, items.map((it) => [it.l - 0.05, it.l + it.w + 0.05]));
   root.add(mergedGroup(steel));
@@ -1307,7 +1317,7 @@ function updateGuides(dt) {
     const w = TW.wayByGid(gd.gid);
     if (!w) { disposeGuide(gd); continue; }
     const d = Math.hypot(w.P[gd.idx * 3] - S.x, w.P[gd.idx * 3 + 1] - S.y);
-    if (!gd.model && d < 1500 && built < 2) { gd.model = buildGuide(gd); built++; }
+    if (!gd.model && d < 1500 && built < 1) { gd.model = buildGuide(gd); built++; }   // 一次只建一座 (畫字、上傳貼圖很花時間，兩座同一幀會頓一下)
     else if (gd.model && d > 2300) disposeGuide(gd);
   }
 }
