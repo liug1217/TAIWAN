@@ -656,6 +656,7 @@ window.addEventListener('pointermove', (e) => { if (dragging) { orbitYaw -= (e.c
 const AER = (params.get('aer') || '150,140').split(',').map(Number);   // 空拍: 後退距離, 高度 (測試可用 ?aer=30,40 近拍)
 const CAMAT = params.get('camat') ? params.get('camat').split(',').map(Number) : null;   // 測試: ?camat=x,y,z&look=x,y,z 固定攝影機 (資料座標)
 const LOOKAT = params.get('look') ? params.get('look').split(',').map(Number) : null;
+if (CAMAT && LOOKAT) { TW.camat = CAMAT; TW.lookat = LOOKAT; }   // 測試: 可直接改陣列移動固定攝影機
 function updateCamera(dt) {
   if (CAMAT && LOOKAT) {
     camera.position.set(CAMAT[0], CAMAT[2], -CAMAT[1]); camera.lookAt(LOOKAT[0], LOOKAT[2], -LOOKAT[1]); camera.updateProjectionMatrix();

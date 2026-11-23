@@ -14,7 +14,7 @@ const { T, params, setStatus, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16,
 const { renderer, MOBILE, scene, GLOW_LAMP, patch, TERRAIN_SPEC,
   matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, matAsphalt, matConcrete, matBarrier, matGore,
   matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber,
-  matReflBlack, matRetro, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, matWater, matTerrain, matLeaf, matSoil } = TW;
+  matReflBlack, matRetro, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, matWater, matTerrain, matLeaf, matSoil, matBark } = TW;
 const S = () => TW.S;   // 玩家狀態 (drive.js 建立)
 
 // ======================================================================= 幾何建構
@@ -88,6 +88,11 @@ const CATS = {
   drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matSoundPost, 1, 1, 'prop'],
   tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
   lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
+  kzmarker: ['uv', () => matKzMarker(), 0, 1, 'prop'], kzhedgeC: ['', () => matKzHedgeC(), 1, 1, 'prop'],
+  kzpalm: ['uv', () => matPalm(), 1, 1, 'prop'], kzpalmT: ['', () => matPalmTrunk(), 1, 1, 'prop'],
+  kzpost: ['', () => matKzPost(), 1, 1, 'mid'], kzgrass: ['', () => matKzGrass(), 0, 1, 'mid'],
+  kzlineY: ['', () => matKzLine(true), 0, 1, 'mid'], kzlineW: ['', () => matKzLine(false), 0, 1, 'mid'],
+  kzwall: ['uv', () => matKzWall(), 0, 1, 'mid'], kzlouver: ['uv', () => matKzLouver(), 1, 1, 'mid'], kzhatch: ['uv', () => matKzHatch(false), 0, 1, 'mid'], kzhatchY: ['uv', () => matKzHatch(true), 0, 1, 'mid'],
   wbeam: ['', () => matWBeam(), 1, 1, 'mid'], wpost: ['', () => matWBeam(), 1, 1, 'prop'], wrefl: ['', () => matWRefl(), 0, 1, 'fine'],
   hedge: ['uv', () => matLeaf, 1, 1, 'prop'], soil: ['', () => matSoil, 0, 1, 'prop'],
   kmface: ['uv', () => matKm(), 0, 1, 'prop'], exitface: ['uv', () => matExit(), 0, 1, 'mid'],
@@ -603,7 +608,8 @@ function addRoad(B, w) {
     if (sb) sb.add([[lx, ly, z - depth], [rx, ry, z - depth]]);
   }
   // 分岔 / 匯流楔形空隙: 兩條路各補一半 (混凝土鋪面，跟路面同高)，蓋住底下的側牆
-  if (!w.tunnel && !w.city && !params.has('nofill')) for (const side of [1, -1]) {
+  const kzLink = !w.city && w.link && !params.has('nokzside') && (kzWeight(P[0], P[1]) > 0 || kzWeight(P[(n - 1) * 3], P[(n - 1) * 3 + 1]) > 0);
+  if (!w.tunnel && !w.city && !kzLink && !params.has('nofill')) for (const side of [1, -1]) {
     const bit = side > 0 ? 1 : 2, fs = new Strip(B, 'skirt', [[0, 1]]);
     let prev = false;
     for (let i = 0; i < n; i++) {
@@ -622,6 +628,8 @@ function addRoad(B, w) {
     const o = edge + inward * BARRIER_INSET;
     // 基隆段 (國 1 里程 5 km 內) 右側照實景是 W 形鋼板護欄 (橋上、隧道照舊混凝土護欄)
     const wbeam = bit === 2 && !w.bridge && !w.link && keelungWay(w) && !params.has('nowbeam');
+    const kzL = !w.city && w.link && !params.has('nokzside') && (kzWeight(P[0], P[1]) > 0 || kzWeight(P[(n - 1) * 3], P[(n - 1) * 3 + 1]) > 0);
+    const kzNb = kzL ? kzSameSide(w, bit) : null;   // 每點: 這一側緊貼同向匝道的槽化區中心 (左法向偏移)，沒有 = NaN
     // 護欄中心 (左法向偏移): 國道主線左邊 = 中央護欄 (w.bc)、右邊 = 加寬後路緣往內 0.35 m
     const oAt = (i) => w.bc ? (bit === 1 ? w.bc[i] : -(hw + ER(i)) + BARRIER_INSET) : o;
     // 共用的中央護欄 (左邊有對向路面) 只由 gid 小的那一條建
@@ -635,7 +643,8 @@ function addRoad(B, w) {
     for (let i = 0; i < n; i++) st.push([s[i], i]);
     for (const c of notch) for (const dd of [-BAR_NOTCH - BAR_RAMP, -BAR_NOTCH, BAR_NOTCH, BAR_NOTCH + BAR_RAMP]) { const d = c + dd; if (d > 0.05 && d < s[n - 1] - 0.05) st.push([d, -1]); }
     st.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
-    const segOk = (k) => !wbeam && !((M[k] | M[k + 1]) & bit) && !(notMine(k) && notMine(k + 1));
+    const segOk = (k) => !wbeam && !kzL && !((M[k] | M[k + 1]) & bit) && !(notMine(k) && notMine(k + 1));
+    if (kzNb) kzSideDeco(B, w, bit, kzNb, oAt);
     if (wbeam) addGuardrail(B, w);
     let k = 0;
     for (let q = 0; q < st.length; q++) {
@@ -704,7 +713,7 @@ function addRoad(B, w) {
       }
     }
     // 反光片: 外側護欄每 24 m 一支 (黃色圓形稜鏡反光片)，反光面朝來車
-    if (bit === 2 && !wbeam) for (let d = 12, k = 0; d < s[n - 1]; d += 24) {
+    if (bit === 2 && !wbeam && !kzL) for (let d = 12, k = 0; d < s[n - 1]; d += 24) {
       const p = along(w, d, k); k = p.k;
       if ((M[k] | M[k + 1]) & bit) continue;
       const q = oPt(w, oAt, p);
@@ -1794,6 +1803,352 @@ function kzFixWay(w) {
   w.kzDone = true;
 }
 
+// ---- 基隆端匝道兩側 (照街景): 外側混凝土矮牆上加綠色半透明隔音板；兩條同向匝道之間是白色斜線槽化區 + 橘色導桿 (沒有護欄)
+var MAT_KZWALL = null, MAT_KZHATCH = null;   // var + 用到才建: CATS 在檔案前面就會呼叫
+function matKzWall() { return MAT_KZWALL || (MAT_KZWALL = new T.MeshStandardMaterial({ color: new T.Color(0.56, 0.74, 0.6), transparent: true, opacity: 0.62, roughness: 0.2, metalness: 0, side: T.DoubleSide, depthWrite: false })); }   // 淡綠半透明壓克力板
+var MAT_KZPOST = null, MAT_KZGRASS = null;
+function matKzPost() { return MAT_KZPOST || (MAT_KZPOST = new T.MeshStandardMaterial({ color: new T.Color(0.3, 0.29, 0.27), metalness: 0.5, roughness: 0.6 })); }
+function matKzGrass() { return MAT_KZGRASS || (MAT_KZGRASS = new T.MeshStandardMaterial({ color: new T.Color(0.3, 0.47, 0.15), roughness: 1 })); }   // 照街景: 亮一點的草綠
+var MAT_KZLINE = null;
+function matKzLine(y) { if (!MAT_KZLINE) MAT_KZLINE = {}; return MAT_KZLINE[y] || (MAT_KZLINE[y] = new T.MeshStandardMaterial({ color: y ? new T.Color(0.82, 0.6, 0.05) : new T.Color(0.82, 0.82, 0.8), roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 })); }
+var MAT_KZLOUVER = null;
+/** 亮綠色百葉隔音板 (照街景): 直條紋凹凸、外框淺綠、上中下三節的接縫 */
+function matKzLouver() {
+  if (MAT_KZLOUVER) return MAT_KZLOUVER;
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 256; const c = cv.getContext('2d');
+  c.fillStyle = '#76bb3f'; c.fillRect(0, 0, 256, 256);
+  for (let x = 10; x < 246; x += 9) { c.fillStyle = '#5c9b2c'; c.fillRect(x, 8, 3, 240); c.fillStyle = '#93d25a'; c.fillRect(x + 3, 8, 2, 240); }   // 直條紋 (百葉)
+  c.fillStyle = '#9fd668'; c.fillRect(0, 0, 256, 8); c.fillRect(0, 248, 256, 8); c.fillRect(0, 0, 8, 256); c.fillRect(248, 0, 8, 256);       // 外框
+  c.fillStyle = '#4f8526'; for (const y of [85, 170]) c.fillRect(0, y, 256, 4);                                                              // 三節接縫
+  for (let k = 0; k < 60; k++) { c.fillStyle = `rgba(60,70,40,${0.04 + Math.random() * 0.06})`; c.fillRect(Math.random() * 256, Math.random() * 256, 2 + Math.random() * 10, 10 + Math.random() * 60); }   // 污漬
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 8;
+  return (MAT_KZLOUVER = new T.MeshStandardMaterial({ map: t, roughness: 0.55, metalness: 0.15, side: T.DoubleSide }));
+}
+function matKzHatch(yellow) {
+  if (!MAT_KZHATCH) MAT_KZHATCH = {};
+  if (MAT_KZHATCH[yellow]) return MAT_KZHATCH[yellow];
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256; const c = cv.getContext('2d');
+  c.fillStyle = '#58585a'; c.fillRect(0, 0, 256, 256);   // 柏油 (跟路面同色)
+  for (let k = 0; k < 220; k++) { const g = 70 + Math.random() * 30; c.fillStyle = `rgba(${g},${g},${g - 2},0.5)`; c.fillRect(Math.random() * 256, Math.random() * 256, 2, 2); }
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.wrapS = t.wrapT = T.RepeatWrapping; t.anisotropy = 8;
+  return (MAT_KZHATCH[yellow] = new T.MeshStandardMaterial({ map: t, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+}
+/** 每點: 這一側 (bit 1 左 / 2 右) 7 m 內有同高度、平行的匝道 (同向或對向) → 槽化區中心的左法向偏移，否則 NaN；out.opp = 對向 */
+function kzSameSide(w, bit) {
+  setupShoulders(w);
+  const { P, nx, ny, n, hw } = w, sd = bit === 1 ? 1 : -1, out = new Float32Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], tx = ny[i], ty = -nx[i], e = hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0));
+    for (let d = 0.3; d <= 7; d += 0.35) {
+      const r = roadAt(x + nx[i] * sd * (e + d), y + ny[i] * sd * (e + d), z + 1, 0, 1.5);
+      if (!r || r.w === w) continue;
+      const dot = r.tx * tx + r.ty * ty;
+      if (!r.w.city && Math.abs(r.z - z) < 1.2 && Math.abs(dot) > 0.8) { out[i] = sd * (e + d / 2); if (dot < 0) out.opp = true; }   // 對向: 黃色斜線
+      break;
+    }
+  }
+  for (let i = 1; i < n - 1; i++) if (isNaN(out[i]) && !isNaN(out[i - 1]) && !isNaN(out[i + 1])) out[i] = (out[i - 1] + out[i + 1]) / 2;
+  return out;
+}
+function kzSideDeco(B, w, bit, nb, oAt) {
+  const { P, nx, ny, s, n, hw } = w, sd = bit === 1 ? 1 : -1;
+  // 槽化區 (斜線) + 橘色導桿: 兩條匝道各鋪自己這一半，導桿只由 gid 小的那條放
+  const hatch = new Strip(B, nb.opp ? 'kzhatchY' : 'kzhatch', [[0, 1]]);
+  for (let i = 0; i < n; i++) {
+    const c = nb[i], ok = i > 0 && !isNaN(c) && !isNaN(nb[i - 1]);
+    if (isNaN(c)) { hatch.add([[0, 0, 0], [0, 0, 0]], false); continue; }
+    const e = sd * (hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0))), x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2] + 0.012;
+    if (kzIsland(w, nb, i)) { hatch.add([[0, 0, 0], [0, 0, 0]], false); continue; }
+    const cc = 2 * c - e + sd * 0.25, a = [x + nx[i] * e, y + ny[i] * e, z, e, s[i]], b = [x + nx[i] * cc, y + ny[i] * cc, z, cc, s[i]];   // 鋪滿整個分隔帶到對面路緣 (兩條各鋪一次，不會有縫看到底下的側牆)
+    hatch.add(sd > 0 ? [b, a] : [a, b], ok);
+  }
+  // 導桿 (照街景): 分隔帶上兩排交錯，各靠自己這側 (離中心 0.22 m)，每排 2 m 一支；gid 小的那條從 1 m 起、另一條從 2 m 起 → 交錯
+  const off = (w.gid % 2) ? 1 : 2;
+  for (let d = off, k = 0; d < s[n - 1]; d += 2) {
+    const p = along(w, d, k); k = p.k;
+    if (isNaN(nb[k]) || isNaN(nb[Math.min(k + 1, n - 1)]) || kzIsland(w, nb, k)) continue;
+    const c = nb[k] - sd * 0.22, x = p.x + nx[k] * c, y = p.y + ny[k] * c, tx = ny[k], ty = -nx[k];
+    box(B.g('reflBlack', x, y), x, y, tx, ty, 0.09, 0.09, p.z, p.z + 0.05);                              // 底座
+    tube(B.g('gpost', x, y), [[x, y, p.z + 0.04], [x, y, p.z + 0.86]], [0.045, 0.032], 8);              // 橘色桿 (往上漸細)
+    for (const h of [0.6, 0.71]) tube(B.g('gband', x, y), [[x, y, p.z + h], [x, y, p.z + h + 0.06]], [0.04, 0.038], 8);   // 白色反光帶
+    tube(B.g('reflBlack', x, y), [[x, y, p.z + 0.86], [x, y, p.z + 0.9]], [0.034, 0.02], 8);            // 頂蓋
+  }
+  kzIslandDeco(B, w, bit, nb);
+  kzOuterWall(B, w, bit, nb);
+}
+/** 這一點的分隔帶夠寬 (>= 2.5 m) → 綠化島 (照街景: 混凝土路緣 + 草地 + 棕櫚樹 + 長方形綠籬) */
+function kzIsland(w, nb, i) {
+  const c = nb[i]; if (isNaN(c)) return false;
+  // 照街景: 港邊門架往南約 30 m (y < 10540) 開始中間是綠化島 (OSM 兩條匝道這裡只隔約 2 m，實際約 4~5 m)
+  if (w.P[i * 3 + 1] < 10540 && w.P[i * 3 + 1] > 10380) return true;
+  const sd = c > 0 ? 1 : -1, e = sd * (w.hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0)));
+  return Math.abs(c - e) * 2 >= 2.5;
+}
+var MAT_PALM = null, MAT_PALMT = null;
+function matPalmTrunk() { return MAT_PALMT || (MAT_PALMT = new T.MeshStandardMaterial({ color: new T.Color(0.42, 0.38, 0.31), roughness: 0.95 })); }   // 灰褐色樹幹
+/** 棕櫚葉 (羽狀): 中肋 + 兩側細長小葉，透明底 */
+function matPalm() {
+  if (MAT_PALM) return MAT_PALM;
+  const cv = document.createElement('canvas'); cv.width = 128; cv.height = 512; const c = cv.getContext('2d');
+  c.clearRect(0, 0, 128, 512);
+  c.strokeStyle = '#5b6b2a'; c.lineWidth = 5; c.beginPath(); c.moveTo(64, 512); c.quadraticCurveTo(66, 250, 64, 0); c.stroke();
+  for (let y = 16; y < 504; y += 5) {
+    const L = 60 * Math.sin(Math.PI * y / 512) + 8, g = 60 + Math.random() * 45;
+    c.strokeStyle = `rgb(${g * 0.6 | 0},${g + 35 | 0},${g * 0.3 | 0})`; c.lineWidth = 6;
+    for (const sd of [-1, 1]) { c.beginPath(); c.moveTo(64, y); c.quadraticCurveTo(64 + sd * L * 0.6, y - 6, 64 + sd * L, y + 16); c.stroke(); }
+  }
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 4;
+  return (MAT_PALM = new T.MeshStandardMaterial({ map: t, alphaTest: 0.4, side: T.DoubleSide, roughness: 0.8 }));
+}
+function kzIslandDeco(B, w, bit, nb) {
+  const { P, nx, ny, s, n, hw } = w, sd = bit === 1 ? 1 : -1;
+  const isl = (i) => kzIsland(w, nb, i);
+  const edge = (i) => sd * (hw - w.ls + 0.3);   // 島邊緣: 黃色車道線外 0.3 m (佔用內側路肩，寬度接近實景)
+  // 路緣 (高 0.22、寬 0.3) + 草地 (自己這半邊)
+  const curb = new Strip(B, 'skirt', [[0, 1], [1, 2]]), grass = new Strip(B, 'kzgrass', [[0, 1]]);
+  for (let i = 0; i < n; i++) {
+    const ok = i > 0 && isl(i) && isl(i - 1), e = edge(i), c = nb[i], x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+    if (!isl(i)) { curb.add([[0, 0, 0], [0, 0, 0], [0, 0, 0]], false); grass.add([[0, 0, 0], [0, 0, 0]], false); continue; }
+    const at = (o) => [x + nx[i] * o, y + ny[i] * o], [ax, ay] = at(e), [bx, by] = at(e + sd * 0.3), [cx, cy] = at(2 * c - e - sd * 0.3);   // 草地鋪到對面路緣 (兩邊重疊，中間不會露縫)
+    curb.add(sd > 0 ? [[bx, by, z + 0.22], [ax, ay, z + 0.22], [ax, ay, z]] : [[ax, ay, z], [ax, ay, z + 0.22], [bx, by, z + 0.22]], ok);
+    grass.add(sd > 0 ? [[cx, cy, z + 0.2], [bx, by, z + 0.2]] : [[bx, by, z + 0.2], [cx, cy, z + 0.2]], ok);
+  }
+  // 植栽只由 gid 小的那條放 (島中心線上)
+  const o = (() => { for (let i = 0; i < n; i++) if (isl(i)) { const off = 2 * nb[i] - sd * (hw + 0.5); const r = roadAt(P[i * 3] + nx[i] * off, P[i * 3 + 1] + ny[i] * off, P[i * 3 + 2] + 1, 0, 1.5); return r && r.w; } return null; })();
+  if (o && o.gid < w.gid) return;
+  let seed = (w.gid * 977) >>> 0; const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  // 綠籬 (長方體，長約 4.4 m、寬 1.1 m、高 0.8 m)，每 6 m 一段；棕櫚每 12 m 一棵，種在綠籬之間的空隙
+  for (let d = 3, k = 0; d + 2.5 < s[n - 1]; d += 6) {
+    const q = along(w, d, k); k = q.k;
+    if (!isl(q.k) || !isl(Math.min(q.k + 1, n - 1))) continue;
+    const c2 = nb[q.k], hxc = q.x + nx[q.k] * c2, hyc = q.y + ny[q.k] * c2, hz0 = q.z + 0.2, ux = ny[q.k], uy = -nx[q.k], wx = -uy, wy = ux;
+    box(B.g('kzhedgeC', hxc, hyc), hxc, hyc, ux, uy, 2.15, 0.48, hz0, hz0 + 0.72);
+    const hg = B.g('hedge', hxc, hyc);
+    for (let u = -1.9; u <= 1.91; u += 0.55) for (const v of [-0.27, 0.27]) shrub(hg, hxc + ux * u + wx * v, hyc + uy * u + wy * v, hz0, 0.36, 0.42, rnd);
+  }
+  for (let d = 6, k = 0; d < s[n - 1]; d += 12) {
+    const p = along(w, d, k); k = p.k;
+    if (!isl(k) || !isl(Math.min(k + 1, n - 1))) continue;
+    const c = nb[k], x = p.x + nx[k] * c, y = p.y + ny[k] * c, z = p.z + 0.2;
+    {   // 棕櫚樹: 粗幹 (底部最粗) + 16 片下垂的羽狀葉
+      const H = 2.8 + rnd() * 0.9;
+      tube(B.g('kzpalmT', x, y), [[x, y, z], [x, y, z + H * 0.25], [x, y, z + H]], [0.24, 0.17, 0.11], 10);
+      const fg = B.g('kzpalm', x, y);
+      for (let f = 0; f < 16; f++) {
+        const a = f / 16 * Math.PI * 2 + rnd() * 0.3, L = 1.4 + rnd() * 0.5, dx = Math.cos(a), dy = Math.sin(a), droop = 0.2 + rnd() * 0.7;
+        const hx = x + dx * L * 0.9, hy = y + dy * L * 0.9, hz = z + H + 0.3 - droop * L * 0.7, px = -dy * 0.24, py = dx * 0.24;
+        const b0 = fg.n;
+        fg.vv([x + px * 0.3, y + py * 0.3, z + H, 0, 1]); fg.vv([x - px * 0.3, y - py * 0.3, z + H, 1, 1]);
+        fg.vv([hx - px, hy - py, hz, 1, 0]); fg.vv([hx + px, hy + py, hz, 0, 0]);
+        fg.q(b0, b0 + 1, b0 + 2, b0 + 3);
+      }
+    }
+  }
+  // 島頭 (兩端) 黃黑斜紋警示牌 + 灰色短柱，面向來車
+  for (const i0 of [0, n - 1]) {
+    let i = -1;
+    if (i0 === 0) { for (let t = 0; t < n; t++) if (isl(t)) { i = t; break; } }
+    else { for (let t = n - 1; t >= 0; t--) if (isl(t)) { i = t; break; } }
+    if (i < 0) continue;
+    const c = nb[i], tx = ny[i], ty = -nx[i], dir = i0 === 0 ? 1 : -1, x = P[i * 3] + nx[i] * c + tx * dir * 0.6, y = P[i * 3 + 1] + ny[i] * c + ty * dir * 0.6, z = P[i * 3 + 2] + 0.2;
+    box(B.g('wpost', x, y), x, y, tx, ty, 0.04, 0.04, z, z + 1.25);
+    const g = B.g('kzmarker', x, y), b0 = g.n, wx = -ty * 0.16, wy = tx * 0.16, fx = -tx * dir * 0.05, fy = -ty * dir * 0.05;
+    for (const [vx, vy, vz, u, v] of [[x - wx + fx, y - wy + fy, z + 0.35, 0, 0], [x + wx + fx, y + wy + fy, z + 0.35, 1, 0], [x + wx + fx, y + wy + fy, z + 1.3, 1, 1], [x - wx + fx, y - wy + fy, z + 1.3, 0, 1]]) g.vv([vx, vy, vz, u, v]);
+    g.q(b0, b0 + 1, b0 + 2, b0 + 3);
+  }
+}
+var MAT_KZMARKER = null, MAT_KZHEDGEC = null;
+/** 黃黑斜紋警示牌 (雙面) */
+function matKzMarker() {
+  if (MAT_KZMARKER) return MAT_KZMARKER;
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 192; const c = cv.getContext('2d');
+  c.fillStyle = '#f2c300'; c.fillRect(0, 0, 64, 192); c.fillStyle = '#111';
+  for (let k = -4; k < 12; k++) { c.beginPath(); c.moveTo(0, k * 32); c.lineTo(64, k * 32 - 40); c.lineTo(64, k * 32 - 24); c.lineTo(0, k * 32 + 16); c.fill(); }
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace;
+  return (MAT_KZMARKER = new T.MeshStandardMaterial({ map: t, side: T.DoubleSide, roughness: 0.5 }));
+}
+function matKzHedgeC() { return MAT_KZHEDGEC || (MAT_KZHEDGEC = new T.MeshStandardMaterial({ color: new T.Color(0.09, 0.2, 0.06), roughness: 1 })); }
+/** 東側 (往北匝道外側，照街景): W 形鋼板護欄 + 後面矮的亮綠百葉隔音牆 (高約 1.7 m) */
+function kzEastWall(B, w, bit, nb, edge, outer) {
+  const { P, nx, ny, s, n, M } = w, sd = bit === 1 ? 1 : -1;
+  const rail = new Strip(B, 'wbeam', WB_PROF.slice(0, -1).map((_, j) => [j, j + 1]));
+  for (let i = 0; i < n; i++) {
+    const f = edge(i) + sd * 0.3, x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+    rail.add(WB_PROF.map(([o, h]) => [x + nx[i] * (f - sd * o), y + ny[i] * (f - sd * o), z + h]), i > 0 && outer(i) && outer(i - 1));
+  }
+  for (let d = 1, k = 0; d < s[n - 1]; d += 2) {   // H 型鋼立柱 + 墊塊
+    const p = along(w, d, k); k = p.k;
+    if (!outer(k) || !outer(Math.min(k + 1, n - 1))) continue;
+    const tx = ny[k], ty = -nx[k], at = (o) => [p.x + nx[k] * (edge(k) + sd * o), p.y + ny[k] * (edge(k) + sd * o)];
+    const [bx, by] = at(0.38), [qx, qy] = at(0.54), g = B.g('wpost', qx, qy);
+    box(g, bx, by, tx, ty, 0.075, 0.075, p.z + 0.58, p.z + 0.84);
+    box(g, qx, qy, tx, ty, 0.075, 0.05, p.z - 0.4, p.z + 0.8);
+  }
+  let prev = null;
+  for (let d = 0.5, k = 0; d <= s[n - 1]; d += 2.3) {   // 百葉牆
+    const p = along(w, d, k); k = p.k;
+    const ok = outer(k) && outer(Math.min(k + 1, n - 1)), e = edge(k) + sd * 1.1, x = p.x + nx[k] * e, y = p.y + ny[k] * e, z = p.z;
+    if (!ok) { prev = null; continue; }
+    box(B.g('wpost', x, y), x, y, ny[k], -nx[k], 0.08, 0.08, z - 0.3, z + 2.05);
+    if (prev) {
+      const [qx, qy, qz] = prev, g = B.g('kzlouver', (x + qx) / 2, (y + qy) / 2), b0 = g.n;
+      for (const [vx, vy, vz, u, v] of [[qx, qy, qz + 0.3, 0, 0], [x, y, z + 0.3, 1, 0], [x, y, z + 2.0, 1, 0.66], [qx, qy, qz + 2.0, 0, 0.66]]) g.vv([vx, vy, vz, u, v]);
+      g.q(b0, b0 + 1, b0 + 2, b0 + 3);
+    }
+    prev = [x, y, z];
+  }
+}
+/** 外側 (照街景，由路面往外): ① 混凝土路緣 (高 0.4 m) 上一道兩根圓鋼管的護欄 (矮鋼柱 2 m 一支)
+ *  ② 約 0.5 m 草帶  ③ 隔音牆: 混凝土基座 + H 型鋼柱 2.3 m 一支，柱間亮綠百葉板 / 淡綠半透明壓克力板交錯 (半透明板有橫向鋁框條) */
+function kzOuterWall(B, w, bit, nb) {
+  setupShoulders(w);
+  const { P, nx, ny, s, n, hw, M } = w, sd = bit === 1 ? 1 : -1;
+  const mi = n >> 1, south = -nx[mi] < 0;   // 行進方向往南 (tangent y = -nx < 0)：西側型式；往北：東側型式
+  const edge = (i) => sd * (hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0)));
+  const outer = (i) => isNaN(nb[i]) && !(M[i] & bit);
+  // ① 路緣 (斷面: 內側底、內側頂、外側頂、外側底；寬 0.35)
+  const curb = new Strip(B, 'skirt', [[0, 1], [1, 2], [2, 3]]);
+  for (let i = 0; i < n; i++) {
+    const e = edge(i), x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], at = (o) => [x + nx[i] * (e + sd * o), y + ny[i] * (e + sd * o)];
+    const [ax, ay] = at(-0.02), [bx, by] = at(0.33);
+    curb.add(sd > 0 ? [[bx, by, z - 0.2], [bx, by, z + 0.4], [ax, ay, z + 0.4], [ax, ay, z]] : [[ax, ay, z], [ax, ay, z + 0.4], [bx, by, z + 0.4], [bx, by, z - 0.2]], i > 0 && outer(i) && outer(i - 1));
+  }
+  const grass = new Strip(B, 'kzgrass', [[0, 1]]);   // ② 路緣和隔音牆之間的草帶
+  for (let i = 0; i < n; i++) {
+    const e = edge(i), x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2] + 0.32, a = [x + nx[i] * (e + sd * 0.33), y + ny[i] * (e + sd * 0.33), z], b = [x + nx[i] * (e + sd * 0.9), y + ny[i] * (e + sd * 0.9), z];
+    grass.add(sd > 0 ? [b, a] : [a, b], i > 0 && outer(i) && outer(i - 1));
+  }
+  // 圓鋼管 (兩根) 沿路緣，分段建 (遇到不是外側的點就斷開)
+  let run = [];
+  const flush = () => {
+    if (run.length > 1) for (const h of [0.72, 1.02]) { const g = B.g('wpost', run[0][0], run[0][1]); tube(g, run.map(([x, y, z]) => [x, y, z + h]), run.map(() => 0.055), 8); }
+    run = [];
+  };
+  for (let i = 0; i < n; i++) {
+    if (!outer(i)) { flush(); continue; }
+    const e = edge(i) + sd * 0.12; run.push([P[i * 3] + nx[i] * e, P[i * 3 + 1] + ny[i] * e, P[i * 3 + 2]]);
+  }
+  flush();
+  for (let d = 1, k = 0; d < s[n - 1]; d += 2) {   // 鋼管護欄矮柱 + 托架
+    const p = along(w, d, k); k = p.k;
+    if (!outer(k) || !outer(Math.min(k + 1, n - 1))) continue;
+    const e = edge(k), tx = ny[k], ty = -nx[k], at = (o) => [p.x + nx[k] * (e + sd * o), p.y + ny[k] * (e + sd * o)];
+    const [px, py] = at(0.2), [bx, by] = at(0.13), g = B.g('wpost', px, py);
+    box(g, px, py, tx, ty, 0.06, 0.04, p.z + 0.4, p.z + 1.05);
+    for (const h of [0.72, 1.02]) box(g, bx, by, tx, ty, 0.03, 0.06, p.z + h - 0.06, p.z + h + 0.03);
+  }
+  // ③ 隔音牆: 每 2.3 m 一格 (柱 → 柱)，百葉 4 格 / 半透明 3 格交錯
+  const WO = 0.95, BASE = 0.4, TOPH = south ? 2.3 : 2.0;   // 照街景: 板子頂端約在相機 (視線) 高度；東側稍矮
+  let prev = null, cell = 0, vseed = (w.gid * 7919) >>> 0; const vrnd = () => ((vseed = (vseed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  for (let d = 0.5, k = 0; d <= s[n - 1]; d += 2.3) {
+    const p = along(w, d, k); k = p.k;
+    const ok = outer(k) && outer(Math.min(k + 1, n - 1));
+    const e = edge(k) + sd * WO, x = p.x + nx[k] * e, y = p.y + ny[k] * e, z = p.z;
+    if (ok) {
+      box(B.g('kzpost', x, y), x, y, ny[k], -nx[k], 0.1, 0.1, z - 0.3, z + BASE + TOPH + 0.05);   // H 型鋼柱 (深灰帶鏽)
+      if (prev) {
+        const [qx, qy, qz] = prev, louver = !south || cell % 7 < 4 || (y + qy) / 2 < 10545, cat = louver ? 'kzlouver' : 'kzwall';   // 西側: 百葉 4 格 / 半透明 3 格交錯；東側: 全部百葉
+        const g = B.g(cat, (x + qx) / 2, (y + qy) / 2), b0 = g.n;
+        for (const [vx, vy, vz, u, v] of [[qx, qy, qz + BASE, 0, 0], [x, y, z + BASE, 1, 0], [x, y, z + BASE + TOPH, 1, 1], [qx, qy, qz + BASE + TOPH, 0, 1]]) g.vv([vx, vy, vz, u, v]);
+        g.q(b0, b0 + 1, b0 + 2, b0 + 3);
+        // 基座 (混凝土) + 半透明板的橫向鋁框條
+        const mx = (x + qx) / 2, my = (y + qy) / 2, len = Math.hypot(x - qx, y - qy) / 2, ux = (x - qx) / (2 * len || 1), uy = (y - qy) / (2 * len || 1), mz = (z + qz) / 2;
+        box(B.g('skirt', mx, my), mx, my, ux, uy, len, 0.15, mz - 0.3, mz + BASE);
+        if (!louver) for (const h of [0.75, 1.5, 2.25]) box(B.g('wpost', mx, my), mx, my, ux, uy, len, 0.04, mz + BASE + h - 0.04, mz + BASE + h + 0.04);
+        box(B.g('wpost', mx, my), mx, my, ux, uy, len, 0.06, mz + BASE + TOPH - 0.06, mz + BASE + TOPH + 0.04);   // 頂框
+        {   // 牆頂垂下的藤蔓 (照街景: 爬滿牆頂，部分垂到牆面中段)
+          const vg = B.g('hedge', mx, my), rx = -nx[k] * sd, ry = -ny[k] * sd;
+          for (let u = -len + 0.3; u < len; u += 0.7) {
+            const vx = mx + ux * u + rx * 0.12, vy = my + uy * u + ry * 0.12, hang = vrnd();
+            shrub(vg, vx, vy, mz + BASE + TOPH - 0.35 - hang * 0.5, 0.42, 0.3 + hang * 0.25, vrnd);
+          }
+        }
+        cell++;
+      }
+      prev = [x, y, z];
+    } else prev = null;
+  }
+}
+
+// ======================================================================= 基隆端港邊門架 (照 Google 街景 2024，25.12449N 121.73663E)
+// 實景: 生鏽的鍍鋅鋼管箱型桁架 (上下弦桿 + 直桿 + 斜撐)，下方用托架吊一根槽鋼橫梁 (掛牌子)；兩端格構柱。
+// 朝北 (給往北車輛) 掛: 藍「↑ 基隆車站 Keelung Station」+ 咖啡「↑ 基隆廟口夜市 Keelung Night Market」、限速 40、
+// 綠「↑ 東岸高架橋 / ↑ ② 濱海公路 / 西岸高架橋 ↗」；東柱: 兩台監視器、直式綠牌「西岸高架橋靠右」；
+// 西柱 (給往南車輛): 「南 SOUTH」+ 國道 1 號梅花牌 + 「↑」
+const KZG = { gid: 1200, x: 18783.5, y: 10571.0, z: 24.67, nx: 0.883, ny: -0.468, u0: -7.6, u1: 21.9 };
+function kzSignTex(w, h, draw) { const cv = document.createElement('canvas'); cv.width = w; cv.height = h; draw(cv.getContext('2d'), w, h); const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 8; return t; }
+const KZ_HEI = '"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif', KZ_EN = 'Arial,"Helvetica Neue",sans-serif';
+function kzArrow(c, x, y, s, ang = 0, col = '#fff') {   // 實心箭頭 (ang 0 = 往上)
+  c.save(); c.translate(x, y); c.rotate(ang); c.fillStyle = col; c.beginPath();
+  c.moveTo(0, -s * 0.5); c.lineTo(s * 0.36, -s * 0.08); c.lineTo(s * 0.12, -s * 0.08); c.lineTo(s * 0.12, s * 0.5); c.lineTo(-s * 0.12, s * 0.5); c.lineTo(-s * 0.12, -s * 0.08); c.lineTo(-s * 0.36, -s * 0.08); c.closePath(); c.fill(); c.restore();
+}
+function kzPanel(c, w, h, bg, r = 14) { c.fillStyle = bg; c.beginPath(); c.roundRect(0, 0, w, h, r); c.fill(); c.strokeStyle = '#fff'; c.lineWidth = 6; c.beginPath(); c.roundRect(8, 8, w - 16, h - 16, r - 4); c.stroke(); }
+function kzGantry() {
+  const grp = new T.Group();
+  const { x: X0, y: Y0, z: Z0, nx, ny } = KZG, tx = ny, ty = -nx;   // n: 往東 (橫跨)，t: 往南 (1200 行進方向)
+  const W = (u, v, h) => [X0 + nx * u + tx * v, Y0 + ny * u + ty * v, Z0 + h];
+  const steel = new T.MeshStandardMaterial({ color: new T.Color(0.52, 0.47, 0.42), metalness: 0.55, roughness: 0.62 });
+  const g = new GB();
+  const pipe = (a, b, r) => tube(g, [W(...a), W(...b)], [r, r], 6);
+  const H0 = 6.9, H1 = 8.1, BW = 0.45, u0 = KZG.u0, u1 = KZG.u1;
+  // 箱型桁架: 四根弦桿 + 每 1.5 m 直桿 / 斜撐 (前後兩面 + 上下兩面)
+  for (const v of [-BW, BW]) for (const h of [H0, H1]) pipe([u0, v, h], [u1, v, h], 0.07);
+  let k = 0;
+  for (let u = u0; u < u1 - 0.01; u += 1.5, k++) {
+    const u2 = Math.min(u + 1.5, u1);
+    for (const v of [-BW, BW]) { pipe([u, v, H0], [u, v, H1], 0.04); pipe(k % 2 ? [u, v, H0] : [u, v, H1], k % 2 ? [u2, v, H1] : [u2, v, H0], 0.035); }
+    pipe([u, -BW, H1], [u, BW, H1], 0.035); pipe([u, -BW, H0], [u, BW, H0], 0.035); pipe([u, -BW, H1], [u2, BW, H1], 0.03);
+  }
+  pipe([u1, -BW, H0], [u1, -BW, H1], 0.04); pipe([u1, BW, H0], [u1, BW, H1], 0.04);
+  // 下方槽鋼橫梁 (北側，掛牌子) + 吊架
+  const CH = 6.25, CV = 0.75;   // 槽鋼橫梁在南側 (往北車輛看得到的那面，牌子掛在桁架前面)
+  { const a = W(u0 + 1.5, CV, CH), b = W(u1 - 0.8, CV, CH), mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, len = Math.hypot(b[0] - a[0], b[1] - a[1]) / 2;
+    box(g, mx, my, nx, ny, len, 0.07, Z0 + CH - 0.09, Z0 + CH + 0.09); }
+  for (let u = u0 + 2; u < u1 - 1; u += 3) pipe([u, CV, CH], [u, BW, H0], 0.03);
+  // 格構柱 (兩端): 兩支方管腳 + 斜撐
+  for (const uc of [u0, u1]) {
+    for (const v of [-BW, BW]) { const [px, py] = W(uc, v, 0); box(g, px, py, nx, ny, 0.09, 0.09, Z0 - 0.6, Z0 + H1 + 0.1); }
+    for (let h = 0.3; h < H1; h += 1.1) pipe([uc, -BW, h], [uc, BW, h + 1.1], 0.03);
+    const [bx, by] = W(uc, 0, 0); box(g, bx, by, nx, ny, 0.35, 0.7, Z0 - 0.6, Z0 + 0.05);   // 基座
+  }
+  // 東柱監視器 (兩台)
+  for (const [dv, dh] of [[0.2, 7.35], [-0.3, 7.05]]) { const [cx, cy] = W(u1 + 0.35, dv, 0); box(g, cx, cy, tx, ty, 0.22, 0.09, Z0 + dh - 0.09, Z0 + dh + 0.09); }
+  const sm = g.mesh(steel, { cast: true }); grp.add(sm);
+  // ---- 牌子 (平面 + 背板)
+  const back = new T.MeshStandardMaterial({ color: new T.Color(0.45, 0.46, 0.47), metalness: 0.5, roughness: 0.5 });
+  const sign = (tex, uc, hc, w, h, face, vOff = CV + 0.12, noBack = false) => {   // face: +1 朝南 (給往北車)、-1 朝北
+    const mat = new T.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: new T.Color(0.2, 0.2, 0.2), roughness: 0.55, transparent: true, alphaTest: 0.3 });
+    const gg = new GB('uv'), fv = vOff + face * 0.0;
+    const p = (du, dh, uu, vv) => { const q = W(uc + du * face, fv + face * 0.03, hc + dh); return gg.vv([q[0], q[1], q[2], uu, vv]); };
+    const a = p(-w / 2, -h / 2, 0, 0), b = p(w / 2, -h / 2, 1, 0), c = p(w / 2, h / 2, 1, 1), d = p(-w / 2, h / 2, 0, 1);
+    gg.q(a, b, c, d); grp.add(withUv(gg.mesh(mat, { cast: false })));
+    if (!noBack) { const bb = new GB(), [bx, by] = W(uc, fv - face * 0.02, 0); box(bb, bx, by, nx, ny, w / 2, 0.02, Z0 + hc - h / 2, Z0 + hc + h / 2); grp.add(bb.mesh(back, { cast: true })); }
+  };
+  // 藍 + 咖啡 (上下)
+  sign(kzSignTex(512, 230, (c, w, h) => { kzPanel(c, w, h, '#1b5fb5'); kzArrow(c, 58, h / 2, 120); c.fillStyle = '#fff'; c.beginPath(); c.roundRect(118, 52, 74, 92, 10); c.fill(); c.fillStyle = '#1b5fb5'; c.font = 'bold 54px ' + KZ_HEI; c.textAlign = 'center'; c.fillText('🚉', 155, 118);
+    c.fillStyle = '#fff'; c.textAlign = 'left'; c.font = 'bold 66px ' + KZ_HEI; c.fillText('基隆車站', 208, 112); c.font = 'bold 36px ' + KZ_EN; c.fillText('Keelung Station', 210, 190); }), 11.8, H0 + 0.05 - 0.695, 3.1, 1.39, 1);   // 頂部對齊下弦桿
+  sign(kzSignTex(512, 230, (c, w, h) => { kzPanel(c, w, h, '#6b3a1f'); kzArrow(c, 58, h / 2, 120); c.fillStyle = '#fff'; c.font = 'bold 60px ' + KZ_HEI; c.fillText('基隆廟口夜市', 112, 106); c.font = 'bold 34px ' + KZ_EN; c.fillText('Keelung Night Market', 116, 186); }), 11.8, H0 + 0.05 - 1.39 - 0.02 - 0.695, 3.1, 1.39, 1);   // 緊接在藍牌下面
+  // 限速 40
+  sign(kzSignTex(256, 256, (c, w, h) => { c.clearRect(0, 0, w, h); c.fillStyle = '#fff'; c.beginPath(); c.arc(128, 128, 124, 0, 7); c.fill(); c.fillStyle = '#d0202a'; c.beginPath(); c.arc(128, 128, 124, 0, 7); c.arc(128, 128, 96, 0, 7, true); c.fill('evenodd'); c.fillStyle = '#111'; c.font = 'bold 110px ' + KZ_EN; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('40', 128, 134); }), 14.6, H0 - 0.55, 1.2, 1.2, 1, CV + 0.08, true);   // 圓牌直接鎖在橫梁上，沒有背板
+  // 綠色三行
+  sign(kzSignTex(512, 560, (c, w, h) => {
+    kzPanel(c, w, h, '#0b6e3c'); c.strokeStyle = '#fff'; c.lineWidth = 5; for (const y of [186, 372]) { c.beginPath(); c.moveTo(14, y); c.lineTo(w - 14, y); c.stroke(); }
+    c.fillStyle = '#fff'; c.textAlign = 'left';
+    kzArrow(c, 52, 92, 110); c.font = 'bold 74px ' + KZ_HEI; c.fillText('東岸高架橋', 110, 98); c.font = 'bold 34px ' + KZ_EN; c.fillText('Dong-an Viaduct', 150, 160);
+    kzArrow(c, 52, 278, 110); c.beginPath(); c.arc(140, 268, 40, 0, 7); c.fill(); c.fillStyle = '#1d4f9c'; c.beginPath(); c.arc(140, 268, 32, 0, 7); c.fill(); c.fillStyle = '#fff'; c.font = 'bold 44px ' + KZ_EN; c.textAlign = 'center'; c.fillText('2', 140, 284);
+    c.textAlign = 'left'; c.font = 'bold 74px ' + KZ_HEI; c.fillText('濱海公路', 196, 290); c.font = 'bold 34px ' + KZ_EN; c.fillText('Coast Freeway', 200, 350);
+    c.font = 'bold 74px ' + KZ_HEI; c.fillText('西岸高架橋', 30, 462); c.font = 'bold 34px ' + KZ_EN; c.fillText('Shi-an Viaduct', 40, 528); kzArrow(c, 450, 480, 110, Math.PI / 4);
+  }), 17.6, H0 + 0.05 - 1.5, 2.75, 3.0, 1);   // 頂部對齊下弦桿
+  // 東柱直式綠牌「西岸高架橋靠右」
+  sign(kzSignTex(140, 640, (c, w, h) => { kzPanel(c, w, h, '#0b6e3c', 10); c.fillStyle = '#fff'; c.font = 'bold 84px ' + KZ_HEI; c.textAlign = 'center'; [...'西岸高架橋靠右'].forEach((ch, i) => c.fillText(ch, w / 2, 92 + i * 84)); }), u1, 3.9, 0.62, 2.85, 1, BW + 0.13);   // 貼在東柱南面
+  // 西柱 (給往南車): 南 SOUTH / 國道 1 號梅花 / ↑
+  sign(kzSignTex(256, 170, (c, w, h) => { c.fillStyle = '#fff'; c.beginPath(); c.roundRect(0, 0, w, h, 10); c.fill(); c.strokeStyle = '#222'; c.lineWidth = 5; c.beginPath(); c.roundRect(7, 7, w - 14, h - 14, 8); c.stroke(); c.fillStyle = '#111'; c.textAlign = 'center'; c.font = 'bold 78px ' + KZ_HEI; c.fillText('南', w / 2, 88); c.font = 'bold 40px ' + KZ_EN; c.fillText('SOUTH', w / 2, 146); }), u0 - 0.05, 5.0, 0.82, 0.55, -1, -BW - 0.3);
+  sign(kzSignTex(256, 256, (c, w, h) => { c.clearRect(0, 0, w, h); const pl = (k, col) => { c.fillStyle = col; c.beginPath(); for (let i = 0; i <= 120; i++) { const t = i / 120 * Math.PI * 2 + Math.PI / 2, r = w * 0.5 * k * (0.74 + 0.26 * Math.pow(Math.abs(Math.cos(2.5 * (t - Math.PI / 2))), 0.7)); const px = w / 2 + Math.cos(t) * r, py = h / 2 - Math.sin(t) * r; i ? c.lineTo(px, py) : c.moveTo(px, py); } c.closePath(); c.fill(); }; pl(0.98, '#0b6e3c'); pl(0.84, '#ffffff'); c.fillStyle = '#111'; c.font = 'bold 130px ' + KZ_EN; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('1', w / 2, h / 2 + 6); }), u0 - 0.05, 4.25, 0.82, 0.82, -1, -BW - 0.3);
+  sign(kzSignTex(200, 140, (c, w, h) => { c.fillStyle = '#fff'; c.beginPath(); c.roundRect(0, 0, w, h, 10); c.fill(); c.strokeStyle = '#222'; c.lineWidth = 5; c.beginPath(); c.roundRect(7, 7, w - 14, h - 14, 8); c.stroke(); kzArrow(c, w / 2, h / 2, 100, 0, '#111'); }), u0 - 0.05, 3.62, 0.6, 0.42, -1, -BW - 0.3);
+  const c0 = W(0, 0, 0); grp.userData = { x: c0[0], y: c0[1] };
+  return grp;
+}
+
 function* buildTile(rec) {
   const B = new Build();
   // 建模前先修高度 (路面、護欄、物理都用同一份)；港邊街道 / 地形資料還沒到齊就等一下 (最多約 10 秒)，不然會用舊高度建出浮空的路面
@@ -1809,6 +2164,7 @@ function* buildTile(rec) {
     yield;
   }
   for (let k = 0; k < rec.piers.length / 9; k++) addPier(B, rec.piers, k);
+  if (!params.has('nokzg') && rec.ways.some((k) => WAYS[k].gid === KZG.gid)) { const m = kzGantry(); B.chunk(m.userData.x, m.userData.y).extra.push(m); }   // 基隆端港邊門架 (照街景)
   addJoints(B, rec.joints);
   yield;
   // 小塊 -> 網格
@@ -1819,7 +2175,7 @@ function* buildTile(rec) {
       const [, mat, cast, recv, kind] = CATS[cat];
       let m = gb.mesh(mat(), { cast: false, receive: !!recv });
       if (!m) continue;
-      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface' || cat === 'hedge') withUv(m);
+      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface' || cat === 'hedge' || cat === 'kzhatch' || cat === 'kzhatchY' || cat === 'kzlouver' || cat === 'kzwall' || cat === 'kzpalm' || cat === 'kzmarker') withUv(m);
       g.add(m); ch.meshes.push(m); ch.kinds.push(kind); ch.casts.push(!!cast);
       yield;   // 每個網格 (算法向量、建緩衝) 分開做，不要一個小塊全部擠在同一幀 (卡頓)
     }
