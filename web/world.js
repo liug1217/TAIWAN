@@ -14,7 +14,7 @@ const { T, params, setStatus, INDEX, TS, TC, TSTEP, TN, TGI, tkey, tileBuf, Z16,
 const { renderer, MOBILE, scene, GLOW_LAMP, patch, TERRAIN_SPEC,
   matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, matAsphalt, matConcrete, matBarrier, matGore,
   matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber,
-  matReflBlack, matRetro, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, matWater, matTerrain } = TW;
+  matReflBlack, matRetro, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, matWater, matTerrain, matLeaf, matSoil } = TW;
 const S = () => TW.S;   // 玩家狀態 (drive.js 建立)
 
 // ======================================================================= 幾何建構
@@ -88,6 +88,7 @@ const CATS = {
   drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matSoundPost, 1, 1, 'prop'],
   tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
   lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
+  hedge: ['uv', () => matLeaf, 1, 1, 'prop'], soil: ['', () => matSoil, 0, 1, 'prop'],
   kmface: ['uv', () => matKm(), 0, 1, 'prop'], exitface: ['uv', () => matExit(), 0, 1, 'mid'],
   tcab: ['', () => matCabinet, 0, 1, 'fine'], reflBlack: ['', () => matReflBlack, 0, 1, 'fine'], reflFace: ['uv', () => matRetro, 0, 0, 'fine'],
 };
@@ -271,7 +272,7 @@ function kmPosts(B, w, oAt, notMine, nearNotch) {
     const c = oPt(w, oAt, q), tx = ny[kk], ty = -nx[kk], z = q.z, label = (km / 1000).toFixed(1);
     box(B.g('bpole', c.x, c.y), c.x, c.y, tx, ty, 0.03, 0.03, z + 0.85, z + 1.36);
     const W = kmFace(B.g('kmface', c.x, c.y), c.x - tx * 0.018, c.y - ty * 0.018, z + 1.5, -tx, -ty, label);
-    if (pair(kk)) kmFace(B.g('kmface', c.x, c.y), c.x + tx * 0.018, c.y + ty * 0.018, z + 1.5, tx, ty, label);   // 共用的中央護欄: 背面給對向看
+    if (pair(kk) && !w.planter) kmFace(B.g('kmface', c.x, c.y), c.x + tx * 0.018, c.y + ty * 0.018, z + 1.5, tx, ty, label);   // 共用的中央護欄: 背面給對向看
     box(B.g('glare', c.x, c.y), c.x, c.y, tx, ty, 0.014, W / 2 + 0.05, z + 1.36, z + 1.64);
   }
 }
@@ -398,6 +399,45 @@ function lampPost(B, x, y, z0, arms) {
     box(lh, hx, hy, ax, ay, 0.42, 0.17, hz - 0.1, hz + 0.06);
     box(lh, hx + ax * 0.05, hy + ay * 0.05, ax, ay, 0.3, 0.12, hz - 0.16, hz - 0.1);   // 燈罩
     B.chunk(x, y, SUB_P).glows.push(hx, hz - 0.2, -hy);
+  }
+}
+
+// ======================================================================= 基隆段中央分隔帶植栽 (照街景: 兩道護欄中間泥土帶，一叢叢圓灌木約 2 m 一叢)
+function addPlanter(B, w, notMineP) {
+  const { P, nx, ny, s, n } = w, pr = (i) => !!(w.pair && w.pair[i]);
+  const soil = new Strip(B, 'soil', [[0, 1]]);
+  for (let i = 0; i < n; i++) {
+    const c = w.bcC[i], x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2] + 0.55;
+    soil.add([[x + nx[i] * (c + 0.62), y + ny[i] * (c + 0.62), z], [x + nx[i] * (c - 0.62), y + ny[i] * (c - 0.62), z]], i > 0 && pr(i) && pr(i - 1) && !notMineP(i));
+  }
+  let seed = (w.gid * 7919) >>> 0;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  for (let d = 1, k = 0; d < s[n - 1]; d += 2.3 + rnd() * 0.8) {   // 照街景: 一叢一叢，中間有空隙
+    const p = along(w, d, k); k = p.k;
+    if (!(pr(k) && pr(k + 1)) || notMineP(k)) continue;
+    const c = w.bcC[k] + (rnd() - 0.5) * 0.2, x = p.x + nx[k] * c, y = p.y + ny[k] * c;
+    shrub(B.g('hedge', x, y), x, y, p.z + 0.55, 0.72 + rnd() * 0.25, 0.68 + rnd() * 0.3, rnd);
+  }
+}
+/** 一叢灌木: 橢球內 14 片葉叢卡片 (跟樹同一張葉子貼圖)，法向從中心往外 */
+function shrub(g, x, y, z0, rh, rv, rnd) {
+  if (!g.nrm) g.nrm = [];
+  const cz = z0 + rv * 0.95;
+  for (let k = 0; k < 14; k++) {
+    let d = [rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 1.6 - 0.6]; const dl = Math.hypot(d[0], d[1], d[2]) || 1; d = d.map((v) => v / dl);
+    const rr = 0.25 + 0.5 * Math.sqrt(rnd()), pc = [x + d[0] * rh * rr, y + d[1] * rh * rr, cz + d[2] * rv * rr], sz = (0.9 + rnd() * 0.4) * (rh + rv) * 0.48;
+    let nm = [d[0] + rnd() - 0.5, d[1] + rnd() - 0.5, d[2] + rnd() - 0.5]; const nl = Math.hypot(nm[0], nm[1], nm[2]) || 1; nm = nm.map((v) => v / nl);
+    const ref = Math.abs(nm[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
+    let t1 = [nm[1] * ref[2] - nm[2] * ref[1], nm[2] * ref[0] - nm[0] * ref[2], nm[0] * ref[1] - nm[1] * ref[0]]; const tl = Math.hypot(t1[0], t1[1], t1[2]) || 1; t1 = t1.map((v) => v / tl);
+    const t2 = [nm[1] * t1[2] - nm[2] * t1[1], nm[2] * t1[0] - nm[0] * t1[2], nm[0] * t1[1] - nm[1] * t1[0]];
+    const b0 = g.n;
+    for (const [cu, cv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      const v = [pc[0] + (t1[0] * cu + t2[0] * cv) * sz / 2, pc[1] + (t1[1] * cu + t2[1] * cv) * sz / 2, pc[2] + (t1[2] * cu + t2[2] * cv) * sz / 2];
+      g.vv([v[0], v[1], v[2], (cu + 1) / 2, (cv + 1) / 2]);
+      let r = [(v[0] - x) / rh, (v[1] - y) / rh, (v[2] - cz) / rv + 0.3]; const rl = Math.hypot(r[0], r[1], r[2]) || 1;
+      g.nrm.push(r[0] / rl, r[2] / rl, -r[1] / rl);   // 資料座標 -> three (x, z, -y)
+    }
+    g.q(b0, b0 + 1, b0 + 2, b0 + 3);
   }
 }
 
@@ -546,7 +586,8 @@ function addRoad(B, w) {
     // 護欄中心 (左法向偏移): 國道主線左邊 = 中央護欄 (w.bc)、右邊 = 加寬後路緣往內 0.35 m
     const oAt = (i) => w.bc ? (bit === 1 ? w.bc[i] : -(hw + ER(i)) + BARRIER_INSET) : o;
     // 共用的中央護欄 (左邊有對向路面) 只由 gid 小的那一條建
-    const notMine = (i) => bit === 1 && PR(i) && w.oppL[i] && w.oppL[i].gid < w.gid;
+    const notMineP = (i) => bit === 1 && PR(i) && w.oppL[i] && w.oppL[i].gid < w.gid;
+    const notMine = (i) => !w.planter && notMineP(i);   // 植栽分隔帶: 兩道護欄各自建
     const bar = new Strip(B, 'barrier', BAR_PAIRS);
     // 斷面位置: 每個節點 + 門架降低段的前後 (降低段 ±BAR_NOTCH，兩端 BAR_RAMP 斜坡)
     const notch = bit === 1 ? barrierNotches(w) : [], LF = BAR_LOW / 0.87;
@@ -575,7 +616,8 @@ function addRoad(B, w) {
     }
     const nearNotch = (d, r) => notch.some((c) => Math.abs(d - c) < r);
     // 防眩板: 中央分隔護欄頂上每 4 m 一片，板面幾乎垂直路線 (擋對向車燈、側面看得穿)
-    if (bit === 1 && !w.link && w.oneway && !params.has('noglare')) {
+    if (bit === 1 && w.planter) addPlanter(B, w, notMineP);   // 基隆段: 兩道護欄中間的植栽帶 (gid 小的那條建)
+    if (bit === 1 && !w.link && w.oneway && !w.planter && !params.has('noglare')) {
       let skip = false;
       for (let d = 2, k = 0; d < s[n - 1]; d += 4) {
         const p = along(w, d, k); k = p.k;
@@ -604,7 +646,7 @@ function addRoad(B, w) {
       for (let d = 2, k = 0; d < s[n - 1]; d += 40) {
         const p = along(w, d, k); k = p.k;
         if (nearNotch(d, 3.5)) continue;   // 跟門架立柱撞在一起
-        const single = !!w.bc && !PR(k);
+        const single = !!w.bc && (!PR(k) || w.planter);   // 植栽分隔帶上沒有路燈: 改在右側
         if (single) {
           if ((M[k] | M[k + 1]) & 2) continue;
           const o = -(hw + ER(k)) + BARRIER_INSET;
@@ -1426,7 +1468,7 @@ function* buildTile(rec) {
       const [, mat, cast, recv, kind] = CATS[cat];
       let m = gb.mesh(mat(), { cast: false, receive: !!recv });
       if (!m) continue;
-      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface') withUv(m);
+      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface' || cat === 'hedge') withUv(m);
       g.add(m); ch.meshes.push(m); ch.kinds.push(kind); ch.casts.push(!!cast);
       yield;   // 每個網格 (算法向量、建緩衝) 分開做，不要一個小塊全部擠在同一幀 (卡頓)
     }

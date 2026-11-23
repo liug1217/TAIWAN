@@ -414,6 +414,52 @@ const matPostBand = new T.MeshStandardMaterial({ color: 0xf2f2ee, roughness: 0.3
 const matDrum = new T.MeshStandardMaterial({ color: 0xf2c200, roughness: 0.55, metalness: 0 });         // 黃色緩衝桶
 const matDrumBand = new T.MeshStandardMaterial({ color: 0x151515, roughness: 0.6, metalness: 0 });
 // 中央分隔護欄上的綠色防眩板 (照街景: 綠色鋼板、略褪色、底部有灰塵)
+// ======================================================================= 植物: 葉叢貼圖 (樹、分隔島灌木共用)
+// 程式畫的葉叢: 透明底上幾百片橢圓葉子 (深綠在下、亮綠在上)，中心密、邊緣稀，用 alphaTest 切出不規則的樹冠輪廓
+const LEAF_TEX = (() => {
+  const S2 = 512, cv = document.createElement('canvas'); cv.width = cv.height = S2;
+  const c = cv.getContext('2d');
+  let s = 12345; const R = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const leaf = (x, y, len, wid, ang, col) => {
+    c.save(); c.translate(x, y); c.rotate(ang);
+    c.fillStyle = col; c.beginPath(); c.ellipse(0, 0, len, wid, 0, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = 'rgba(255,255,230,0.18)'; c.lineWidth = 1; c.beginPath(); c.moveTo(-len * 0.8, 0); c.lineTo(len * 0.8, 0); c.stroke();   // 葉脈
+    c.restore();
+  };
+  // (不畫細枝: 卡片側著看時會拉成長條紋)
+  const CL = [[S2 / 2, S2 / 2, S2 * 0.3]]; for (let k = 0; k < 13; k++) { const a = R() * 6.28, r = Math.sqrt(R()) * S2 * 0.26; CL.push([S2 / 2 + Math.cos(a) * r, S2 / 2 + Math.sin(a) * r, S2 * (0.14 + R() * 0.1)]); }
+  // 三層葉子: 暗 → 中 → 亮 (上面的層比較亮，像受光)
+  for (const [n, l0, l1, sat] of [[1500, 9, 17, 38], [1200, 14, 24, 42], [650, 21, 32, 46]]) {   // 照街景: 偏暗的橄欖綠；葉子要密
+    for (let k = 0; k < n; k++) {
+      // 葉子集中在幾個小團 (不規則外形，不會看出圓形或方形卡片)
+      const cl = CL[Math.floor(R() * CL.length)], a = R() * 6.28, r = Math.pow(R(), 0.7) * cl[2];
+      const x = cl[0] + Math.cos(a) * r, y = cl[1] + Math.sin(a) * r;
+      if (Math.hypot(x - S2 / 2, y - S2 / 2) > S2 * 0.47) continue;
+      const hue = 74 + R() * 30, lt = l0 + R() * (l1 - l0);
+      leaf(x, y, 9 + R() * 9, 4 + R() * 3.5, R() * 6.28, `hsl(${hue.toFixed(0)},${(sat + R() * 12).toFixed(0)}%,${lt.toFixed(0)}%)`);
+    }
+  }
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.anisotropy = 4;
+  return t;
+})();
+const BARK_TEX = (() => {
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 256;
+  const c = cv.getContext('2d'); let s = 777; const R = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  c.fillStyle = '#4a3d31'; c.fillRect(0, 0, 64, 256);
+  for (let k = 0; k < 160; k++) { const g = 40 + R() * 50; c.fillStyle = `rgba(${g + 20},${g + 10},${g},0.55)`; c.fillRect(R() * 64, R() * 256, 1 + R() * 3, 10 + R() * 50); }
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.wrapS = t.wrapT = T.RepeatWrapping;
+  return t;
+})();
+/** 葉子材質: 雙面、alphaTest 切輪廓；法向用「從樹冠中心往外」(幾何裡給)，背面不翻轉法向 → 整團樹冠光影柔和像體積，不是一片片紙 */
+function leafMaterial(vertexColors) {
+  const m = new T.MeshStandardMaterial({ map: LEAF_TEX, alphaTest: 0.42, side: T.DoubleSide, roughness: 0.82, metalness: 0, vertexColors });
+  m.onBeforeCompile = (sh) => { sh.fragmentShader = sh.fragmentShader.replace('#include <normal_fragment_begin>', T.ShaderChunk.normal_fragment_begin.replace('float faceDirection = gl_FrontFacing ? 1.0 : - 1.0;', 'float faceDirection = 1.0;')); };
+  m.customProgramCacheKey = () => 'leaf' + (vertexColors ? 'vc' : '');
+  return m;
+}
+const matLeaf = leafMaterial(false), matLeafVC = leafMaterial(true);
+const matBark = new T.MeshStandardMaterial({ map: BARK_TEX, roughness: 0.95, metalness: 0 });
+const matSoil = new T.MeshStandardMaterial({ color: new T.Color(0.16, 0.12, 0.08), roughness: 1, metalness: 0 });
 const matGlare = patch(new T.MeshStandardMaterial({ roughness: 0.55, metalness: 0.25, side: T.DoubleSide }), {
   color: 'diffuseColor.rgb = vec3(0.045, 0.24, 0.085) * (0.8 + 0.35 * fwyFbm(vObj * 3.0, 3));',
 });
@@ -655,5 +701,5 @@ const TERRAIN_SPEC = {
 };
 const matTerrain = patch(new T.MeshStandardMaterial({ roughness: 0.95, metalness: 0 }), TERRAIN_SPEC);
 
-Object.assign(TW, { renderer, MOBILE, scene, camera, SUN_DIR, NIGHT, WEATHER, sun, smooth01, updateDayNight, cycleTime, GLOW_TEX, GLOW_LAMP, matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, patch, matAsphalt, matConcrete, matBarrier, matGore, matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber, matReflR, matReflBlack, matRetro, matRetroGlow, matReflY, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, WATER_T, matWater, TERRAIN_SPEC, matTerrain });
+Object.assign(TW, { renderer, MOBILE, scene, camera, SUN_DIR, NIGHT, WEATHER, sun, smooth01, updateDayNight, cycleTime, GLOW_TEX, GLOW_LAMP, matLampPole, matSoundWall, matSoundUpper, matSoundPost, matBillboard, matBillboardBack, matLampHead, patch, matAsphalt, matConcrete, matBarrier, matGore, matPost, matPostBand, matDrum, matDrumBand, matGlare, matCityRoad, matWall, matRoof, matJointSteel, matJointRubber, matReflR, matReflBlack, matRetro, matRetroGlow, matReflY, matTunnelWall, matCabinet, matRail, matPortal, matTunnelLight, WATER_T, matWater, TERRAIN_SPEC, matTerrain, LEAF_TEX, matLeaf, matLeafVC, matBark, matSoil });
 })();

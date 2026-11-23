@@ -320,6 +320,21 @@ function setupShoulders(w) {
     bc[i] = pair[i] ? w.hw + mid[i] : w.hw + eL[i] - BARRIER_INSET;
   }
   Object.assign(w, { shoulder: true, eL, eR, bc, pair, oppL: opp });
+  // 基隆段 (國 1 里程 5 km 內) 中央分隔帶照實景: 兩道護欄、中間一條植栽帶種灌木 (不是共用的一道護欄)。
+  // bcC = 分隔帶中心 (植栽)，bc 改成自己這側護欄的中心 (往自己這邊退 PLANT_OFF)
+  if (pair.some(Boolean) && planterWay(w)) {
+    const bcC = Float32Array.from(bc);
+    for (let i = 0; i < n; i++) if (pair[i]) bc[i] = bcC[i] - PLANT_OFF;
+    w.planter = true; w.bcC = bcC;
+  }
+}
+const PLANT_OFF = 0.9;
+let LIVE_MAP = null;
+function planterWay(w) {
+  if (params.has('noplanter')) return false;
+  if (!LIVE_MAP) { try { LIVE_MAP = JSON.parse(document.getElementById('extra-live').textContent).wayMap || []; } catch (e) { LIVE_MAP = []; } }
+  const mp = LIVE_MAP[w.gid];
+  return !!mp && mp[0] === '國道1號' && mp[2] < 5000;
 }
 const clampI = (w, i) => Math.min(Math.max(i | 0, 0), w.n - 1);
 /** 門架 / 看板左側立柱位置 (左法向偏移): 國道主線立在中央護欄上 */

@@ -1948,27 +1948,84 @@ TW.HOOKS.init.push(() => {
 // 道路兩側 8 m 內、高架下方都不種。玩家移動 150 m 以上才重新排一次。
 const trees = (() => {
   if (TW.params.has('notrees')) return { update() {}, dirty() {} };
-  const CAP = TW.MOBILE ? 700 : 7000, R = TW.MOBILE ? 320 : 900, STEP = 18;
-  const crownGeo = new T.IcosahedronGeometry(1, 1);
-  { // 樹冠稍微壓扁、表面不規則
-    const p = crownGeo.getAttribute('position');
-    for (let i = 0; i < p.count; i++) { const k = 0.85 + 0.3 * Math.abs(Math.sin(p.getX(i) * 7.1 + p.getZ(i) * 5.3)); p.setXYZ(i, p.getX(i) * k, p.getY(i) * 0.8 * k, p.getZ(i) * k); }
-    crownGeo.computeVertexNormals();
+  const CAP = TW.MOBILE ? 700 : 7000, R = TW.MOBILE ? 320 : 900, STEP = 18, NV = 3;   // NV: 樹形種類
+  // ---- 樹的模型 (照真實闊葉樹: 樹幹分出 3~4 支主枝，樹冠由幾十片葉叢卡片組成；以 10 m 高的樹建，放置時整體縮放)
+  // 近距離 (96 片葉叢 + 主枝) / 遠距離 (18 片大葉叢、只有樹幹) 兩級，同一個種子 → 遠近輪廓一致
+  function treeGeo(seed, far) {
+    let s = seed >>> 0; const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+    const W = { p: [], n: [], uv: [], i: [] }, L = { p: [], n: [], uv: [], c: [], i: [] };
+    // 圓錐台 (a → b，半徑 ra → rb)
+    const cyl = (a, b, ra, rb, seg) => {
+      const ax = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], len = Math.hypot(...ax), u = ax.map((v) => v / len);
+      const ref = Math.abs(u[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+      let t1 = [u[1] * ref[2] - u[2] * ref[1], u[2] * ref[0] - u[0] * ref[2], u[0] * ref[1] - u[1] * ref[0]]; const tl = Math.hypot(...t1); t1 = t1.map((v) => v / tl);
+      const t2 = [u[1] * t1[2] - u[2] * t1[1], u[2] * t1[0] - u[0] * t1[2], u[0] * t1[1] - u[1] * t1[0]];
+      const b0 = W.p.length / 3;
+      for (const [o, r, v] of [[a, ra, 0], [b, rb, len / 2]]) for (let k = 0; k <= seg; k++) {
+        const ang = k / seg * Math.PI * 2, cs = Math.cos(ang), sn = Math.sin(ang), nx = t1[0] * cs + t2[0] * sn, ny = t1[1] * cs + t2[1] * sn, nz = t1[2] * cs + t2[2] * sn;
+        W.p.push(o[0] + nx * r, o[1] + ny * r, o[2] + nz * r); W.n.push(nx, ny, nz); W.uv.push(k / seg, v);
+      }
+      for (let k = 0; k < seg; k++) W.i.push(b0 + k, b0 + seg + 1 + k, b0 + k + 1, b0 + k + 1, b0 + seg + 1 + k, b0 + seg + 2 + k);
+    };
+    const lean = [(rnd() - 0.5) * 0.5, (rnd() - 0.5) * 0.5], top = [lean[0], 3.4 + rnd() * 0.8, lean[1]];
+    cyl([0, -0.4, 0], top, 0.27, 0.18, far ? 5 : 8);
+    const C = [lean[0] * 1.5, 6.3 + rnd() * 0.5, lean[1] * 1.5], RX = 3.5 + rnd() * 0.8, RY = 2.9 + rnd() * 0.5, RZ = 3.5 + rnd() * 0.8;   // 樹冠大而密 (台灣低海拔闊葉樹)
+    if (!far) {
+      const nl = 3 + (rnd() < 0.5 ? 1 : 0);
+      for (let k = 0; k < nl; k++) {
+        const a = (k / nl + rnd() * 0.2) * Math.PI * 2, el = 0.55 + rnd() * 0.35, len = 2.6 + rnd() * 1.0;
+        const end = [top[0] + Math.cos(a) * Math.sin(el) * len, top[1] + Math.cos(el) * len, top[2] + Math.sin(a) * Math.sin(el) * len];
+        cyl(top, end, 0.15, 0.06, 6);
+        const end2 = [end[0] + Math.cos(a + 0.6) * 1.2, end[1] + 0.9, end[2] + Math.sin(a + 0.6) * 1.2];   // 末端再分一支
+        cyl(end, end2, 0.06, 0.03, 4);
+      }
+    }
+    // 葉叢卡片: 樹冠橢球內 (外圈多)，每片隨機朝向；法向 = 從樹冠中心往外；顏色: 上亮下暗 (受光 / 自身遮蔽)
+    const nCards = far ? 18 : 96;
+    for (let k = 0; k < nCards; k++) {
+      let d = [rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1]; const dl = Math.hypot(...d) || 1; d = d.map((v) => v / dl);
+      const rr = 0.3 + 0.65 * Math.sqrt(rnd()), pc = [C[0] + d[0] * RX * rr, C[1] + d[1] * RY * rr, C[2] + d[2] * RZ * rr];
+      const sz = (far ? 3.6 : 2.1) * (0.85 + rnd() * 0.4);
+      let nrm = [rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1];   // 完全隨機朝向: 樹冠從哪個方向看都蓬，不會像貼在表面的紙 const nn = Math.hypot(...nrm) || 1; nrm = nrm.map((v) => v / nn);
+      const ref = Math.abs(nrm[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+      let t1 = [nrm[1] * ref[2] - nrm[2] * ref[1], nrm[2] * ref[0] - nrm[0] * ref[2], nrm[0] * ref[1] - nrm[1] * ref[0]]; const tl = Math.hypot(...t1); t1 = t1.map((v) => v / tl);
+      const t2 = [nrm[1] * t1[2] - nrm[2] * t1[1], nrm[2] * t1[0] - nrm[0] * t1[2], nrm[0] * t1[1] - nrm[1] * t1[0]];
+      const rot = rnd() * Math.PI * 2, cr = Math.cos(rot), sr = Math.sin(rot);
+      const b0 = L.p.length / 3, hy = (pc[1] - (C[1] - RY)) / (2 * RY), shade = (0.55 + 0.55 * hy) * (0.88 + rnd() * 0.24), tint = 0.92 + rnd() * 0.16;
+      for (const [cu, cv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const ou = (cu * cr - cv * sr) * sz / 2, ov = (cu * sr + cv * cr) * sz / 2;
+        const v = [pc[0] + t1[0] * ou + t2[0] * ov, pc[1] + t1[1] * ou + t2[1] * ov, pc[2] + t1[2] * ou + t2[2] * ov];
+        L.p.push(...v);
+        let r = [(v[0] - C[0]) / RX, (v[1] - C[1]) / RY * 0.8 + 0.25, (v[2] - C[2]) / RZ]; const rl = Math.hypot(...r) || 1; r = r.map((q) => q / rl);
+        L.n.push(...r); L.uv.push((cu + 1) / 2, (cv + 1) / 2); L.c.push(shade * tint, shade, shade * (2 - tint));
+      }
+      L.i.push(b0, b0 + 1, b0 + 2, b0, b0 + 2, b0 + 3);
+    }
+    const mk = (o, color) => {
+      const g = new T.BufferGeometry();
+      g.setAttribute('position', new T.Float32BufferAttribute(o.p, 3)); g.setAttribute('normal', new T.Float32BufferAttribute(o.n, 3)); g.setAttribute('uv', new T.Float32BufferAttribute(o.uv, 2));
+      if (color) g.setAttribute('color', new T.Float32BufferAttribute(o.c, 3));
+      g.setIndex(o.i); g.computeBoundingSphere(); return g;
+    };
+    return { wood: mk(W, false), leaf: mk(L, true) };
   }
-  const trunkGeo = new T.CylinderGeometry(0.12, 0.2, 1, 6);
-  // 近 (220 m 內，投射陰影) / 遠 (不投射、樹冠面數少) 兩組: 陰影那一輪只畫近的 (以前 7000 棵全畫，約 60 萬三角形)
-  const NEAR_R = 220, crownFar = new T.IcosahedronGeometry(1, 0);
-  { const p = crownFar.getAttribute('position'); for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) * 0.8); crownFar.computeVertexNormals(); }
-  const crownMat = new T.MeshStandardMaterial({ roughness: 0.9, metalness: 0, flatShading: true }), trunkMat = new T.MeshStandardMaterial({ color: 0x3b2a1c, roughness: 0.95 });
-  const crown = new T.InstancedMesh(crownGeo, crownMat, CAP), trunk = new T.InstancedMesh(trunkGeo, trunkMat, CAP);
-  const crownF = new T.InstancedMesh(crownFar, crownMat, CAP), trunkF = new T.InstancedMesh(trunkGeo, trunkMat, CAP);
-  for (const m of [crown, trunk, crownF, trunkF]) { m.castShadow = m === crown || m === trunk; m.receiveShadow = true; m.count = 0; m.frustumCulled = false; TW.scene.add(m); }
+  // ---- 每種樹形: 近 (樹幹 + 葉叢，投射陰影) / 遠 (不投射) 各一組 InstancedMesh
+  const NEAR_R = 220, sets = [];
+  for (let v = 0; v < NV; v++) {
+    const gn = treeGeo(1000 + v * 77, false), gf = treeGeo(1000 + v * 77, true), set = {};
+    set.wood = new T.InstancedMesh(gn.wood, TW.matBark, CAP); set.leaf = new T.InstancedMesh(gn.leaf, TW.matLeafVC, CAP);
+    set.woodF = new T.InstancedMesh(gf.wood, TW.matBark, CAP); set.leafF = new T.InstancedMesh(gf.leaf, TW.matLeafVC, CAP);
+    for (const [k, m] of Object.entries(set)) { m.castShadow = k === 'wood' || k === 'leaf'; m.receiveShadow = true; m.count = 0; m.frustumCulled = false; TW.scene.add(m); }
+    sets.push(set);
+  }
+  const all = sets.flatMap((st) => Object.values(st));
   const M4 = new T.Matrix4(), Q = new T.Quaternion(), V = new T.Vector3(), SC = new T.Vector3(), COL = new T.Color(), UP = new T.Vector3(0, 1, 0);
   const hash = (i, j, k) => { let h = (i * 374761393 + j * 668265263 + k * 2147483647) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
   let cx = 1e9, cy = 1e9;
   function rebuild() {
     cx = S.x; cy = S.y;
-    let n = 0, nn = 0, nf = 0;
+    let n = 0;
+    const cnt = sets.map(() => [0, 0]);
     const i0 = Math.floor((cx - R) / STEP), i1 = Math.floor((cx + R) / STEP), j0 = Math.floor((cy - R) / STEP), j1 = Math.floor((cy + R) / STEP);
     for (let i = i0; i <= i1 && n < CAP; i++) for (let j = j0; j <= j1 && n < CAP; j++) {
       const x = (i + hash(i, j, 1)) * STEP, y = (j + hash(i, j, 2)) * STEP;
@@ -1983,17 +2040,18 @@ const trees = (() => {
       if (sl > 1.2) dens *= 0.4;                       // 懸崖
       if (hash(i, j, 3) > dens) continue;
       if (TW.roadAt(x, y, z + 30, -8, 0)) continue;     // 道路附近、高架下方不種
-      const h = 6 + hash(i, j, 4) * 9, w = h * (0.32 + hash(i, j, 5) * 0.14);
+      const h = 6 + hash(i, j, 4) * 9, sc = h / 10, wv = 0.85 + hash(i, j, 5) * 0.35;
       Q.setFromAxisAngle(UP, hash(i, j, 6) * 6.28);
-      const near = (x - cx) ** 2 + (y - cy) ** 2 < NEAR_R * NEAR_R, C = near ? crown : crownF, Tr = near ? trunk : trunkF, q = near ? nn++ : nf++;
-      M4.compose(V.set(x, z + h * 0.62, -y), Q, SC.set(w, h * 0.42, w)); C.setMatrixAt(q, M4);
-      M4.compose(V.set(x, z + h * 0.2 - 0.3, -y), Q, SC.set(1, h * 0.45, 1)); Tr.setMatrixAt(q, M4);
+      const v = Math.min(NV - 1, Math.floor(hash(i, j, 8) * NV)), near = (x - cx) ** 2 + (y - cy) ** 2 < NEAR_R * NEAR_R, st = sets[v];
+      const Wd = near ? st.wood : st.woodF, Lf = near ? st.leaf : st.leafF, q = cnt[v][near ? 0 : 1]++;
+      M4.compose(V.set(x, z - 0.05, -y), Q, SC.set(sc * wv, sc, sc * wv));
+      Wd.setMatrixAt(q, M4); Lf.setMatrixAt(q, M4);
       const g = hash(i, j, 7);
-      C.setColorAt(q, COL.setRGB(0.03 + g * 0.04, 0.07 + g * 0.06, 0.025 + g * 0.02));
+      Lf.setColorAt(q, COL.setRGB(0.78 + g * 0.3, 0.85 + g * 0.25, 0.7 + g * 0.2));   // 每棵樹色調略不同 (乘在葉叢貼圖上)
       n++;
     }
-    crown.count = trunk.count = nn; crownF.count = trunkF.count = nf;
-    for (const m of [crown, trunk, crownF, trunkF]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
+    sets.forEach((st, v) => { st.wood.count = st.leaf.count = cnt[v][0]; st.woodF.count = st.leafF.count = cnt[v][1]; });
+    for (const m of all) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
   }
   let clock = 0, since = 0, early = 0, dirtyT = 0;
   return {
@@ -2005,7 +2063,7 @@ const trees = (() => {
       if (Math.hypot(S.x - cx, S.y - cy) > 150) { early = 0; since = 0; rebuild(); }
       else if (early < 6 && since > 3) { early++; since = 0; rebuild(); }
     },
-    get count() { return crown.count + crownF.count; },
+    get count() { return sets.reduce((a, st) => a + st.leaf.count + st.leafF.count, 0); },
     dirty() { dirtyT = 1.0; },
   };
 })();
