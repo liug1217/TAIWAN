@@ -2503,7 +2503,10 @@ function addTunnel(B, w) {
   }
   // 國 1 基隆端的中興 / 大業隧道: 兩個洞口共用一面照實景精細建模的洞門 (由中興隧道建)
   const zx = !params.has('nozx') && zxPair(w);
-  for (const i of [0, n - 1]) if (isTunnelEnd(w, i) && !(zx && i === zx.end)) B.chunk(P[i * 3], P[i * 3 + 1]).extra.push(portalMesh(w, i));
+  // 中興隧道南端 (南下出口) 也照實景建 (石塊拼貼洞門 + V 字形石砌擋土牆)
+  const zxExit = !params.has('nozx') && /中興隧道/.test(w.name || '') && w.tunnel && isTunnelEnd(w, n - 1);
+  for (const i of [0, n - 1]) if (isTunnelEnd(w, i) && !(zx && i === zx.end) && !(zxExit && i === n - 1)) B.chunk(P[i * 3], P[i * 3 + 1]).extra.push(portalMesh(w, i));
+  if (zxExit) { const m = zhongxingExitPortal(w); B.chunk(m.userData.x, m.userData.y).extra.push(m); }
   if (zx && zx.build) { const m = zhongxingPortal(zx); B.chunk(m.userData.x, m.userData.y).extra.push(m); }
   if (!params.has('nokm')) kmTunnel(B, w, a);
   if (w.oneway && !w.link && isTunnelEnd(w, 0) && !zx) { const m = tunnelSign(w); if (m) B.chunk(m.userData.x, m.userData.y).extra.push(m); }
@@ -2758,6 +2761,137 @@ function zhongxingPortal({ zw, dw }) {
     quad([[x - bw / 2, h0, 14.0], [x + bw / 2, h0, 14.0], [x + bw / 2, h0 + bh, 14.0], [x - bw / 2, h0 + bh, 14.0]], UV1, M.red); }
   const c = W(xD / 2, 0, 0);
   grp.userData = { x: c[0], y: c[1] };
+  return grp;
+}
+
+// ======================================================================= 中興隧道南端 (南下出口) 洞門 (照 Google 街景 2024-05)
+// 實景: 灰白不規則石塊拼貼的洞門牆，中段一道突出的橫線腳 (下面一排小托架)，上段中央金字匾；拱圈外深灰石框；牆頂一排鋼管欄杆；
+// 兩側巨大的深灰不規則石砌斜擋土牆 (V 字形路塹)，右側擋土牆頂也有欄杆；左側牆腳一支單臂路燈
+var ZXE_MAT = null;
+function zxeMats() {
+  if (ZXE_MAT) return ZXE_MAT;
+  const R = zxRand(31);
+  // 不規則石塊拼貼: 格點亂數偏移 → 每格一塊不規則四邊形 (有些再斜切成兩塊)，石縫深灰
+  const mosaic = (light) => zxTex(512, 512, (c, w, h) => {
+    const N = 9, P = [];
+    for (let j = 0; j <= N; j++) { const row = []; for (let i = 0; i <= N; i++) { const edge = i === 0 || i === N || j === 0 || j === N; row.push([i * w / N + (edge ? 0 : (R() - 0.5) * w / N * 0.7), j * h / N + (edge ? 0 : (R() - 0.5) * h / N * 0.7)]); } P.push(row); }
+    for (let i = 0; i < N; i++) { P[N][i][0] = P[0][i][0]; P[i][N][1] = P[i][0][1]; }   // 上下、左右接得起來 (可重複貼)
+    c.fillStyle = light ? '#5e5d58' : '#3c3d39'; c.fillRect(0, 0, w, h);
+    const stone = (pts) => {
+      const g = light ? 185 + R() * 55 : 95 + R() * 60, tint = light ? 0 : R() * 10;
+      c.fillStyle = `rgb(${g | 0},${(g + tint) | 0},${(g - 4) | 0})`;
+      c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (const p of pts.slice(1)) c.lineTo(p[0], p[1]); c.closePath(); c.fill();
+    };
+    const inset = (pts, k) => { const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length, cy = pts.reduce((a, p) => a + p[1], 0) / pts.length; return pts.map((p) => [cx + (p[0] - cx) * k, cy + (p[1] - cy) * k]); };
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const q = [P[j][i], P[j][i + 1], P[j + 1][i + 1], P[j + 1][i]];
+      if (R() < 0.45) { stone(inset([q[0], q[1], q[2]], 0.9)); stone(inset([q[0], q[2], q[3]], 0.9)); }
+      else stone(inset(q, 0.92));
+    }
+    // 雨水污漬 (往下流)
+    for (let k = 0; k < 90; k++) { c.fillStyle = light ? `rgba(70,72,62,${0.04 + R() * 0.07})` : `rgba(40,55,35,${0.05 + R() * 0.1})`; c.fillRect(R() * w, R() * h, 3 + R() * 14, 30 + R() * 140); }
+  }, [1 / 4, 1 / 4]);
+  const plaque = zxTex(Math.round(120 * (4 * 1.6 + 1)), 240, (c, w, h) => {
+    c.fillStyle = '#4e6a55'; c.fillRect(0, 0, w, h);
+    c.strokeStyle = '#a99c6c'; c.lineWidth = 10; c.strokeRect(14, 14, w - 28, h - 28);
+    c.fillStyle = '#cdbb7f'; c.font = `bold 120px ${ZX_KAI}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    const step = 120 * 1.6, x0 = w / 2 - step * 1.5;
+    [...'中興隧道'].forEach((ch, i) => c.fillText(ch, x0 + step * i, h / 2 + 6));
+  });
+  const std = (o) => new T.MeshStandardMaterial(Object.assign({ roughness: 0.92, metalness: 0 }, o));
+  ZXE_MAT = {
+    face: std({ map: mosaic(true) }), wing: std({ map: mosaic(false), side: T.DoubleSide }),
+    plaque: std({ map: plaque, emissiveMap: plaque, emissive: new T.Color(0.12, 0.12, 0.12), roughness: 0.6, side: T.DoubleSide }),
+    ledge: std({ color: new T.Color(0.66, 0.66, 0.63) }),
+  };
+  return ZXE_MAT;
+}
+function zhongxingExitPortal(zw) {
+  const M = zxMats(), ME = zxeMats(), grp = new T.Group();
+  const e = zw.n - 1, E = [zw.P[e * 3], zw.P[e * 3 + 1]], z0 = zw.P[e * 3 + 2];
+  // 洞門座標: 面向洞口 (站在洞外) 時 sx 往右、sz 往洞外 (= 隧道行進方向)、h 離路面高
+  const Zd = [zw.ny[e], -zw.nx[e]], Xd = [zw.nx[e], zw.ny[e]];
+  const W = (sx, h, sz) => [E[0] + Xd[0] * sx + Zd[0] * sz, E[1] + Xd[1] * sx + Zd[1] * sz, z0 + h];
+  const add = (geo, mat, cast = true) => { const m = new T.Mesh(geo, mat); m.castShadow = cast; m.receiveShadow = true; m.matrixAutoUpdate = false; grp.add(m); return m; };
+  const place = (geo) => { const p = geo.attributes.position; for (let i = 0; i < p.count; i++) { const q = W(p.getX(i), p.getY(i), p.getZ(i)); p.setXYZ(i, q[0], q[2], -q[1]); } geo.computeVertexNormals(); geo.computeBoundingSphere(); return geo; };
+  const quad = (pts, uvs, mat, cast = false) => {
+    const g = new GB('uv'); const ids = pts.map((q, i) => { const p = W(q[0], q[1], q[2]); return g.vv([p[0], p[1], p[2], uvs[i][0], uvs[i][1]]); });
+    g.q(ids[0], ids[1], ids[2], ids[3]); const m = withUv(g.mesh(mat, { cast })); grp.add(m); return m;
+  };
+  const UV1 = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const a = zw.hw + 0.9, H = 7.2, Hw = 2.9, RIM = 0.9, TOP = 10.8, LEDGE = 8.6;
+  const XB = a + 2.6, BAT = 6.2, XT = XB + BAT;   // 牆腳半寬、斜邊往外、牆頂半寬
+  const arch = (k, path) => {
+    const A = a + k, HH = H + k;
+    path.moveTo(-A, -0.6); path.lineTo(-A, Hw);
+    for (let j = 1; j < 24; j++) { const t = Math.PI * j / 24; path.lineTo(-Math.cos(t) * A, Hw + Math.sin(t) * (HH - Hw)); }
+    path.lineTo(A, Hw); path.lineTo(A, -0.6); path.lineTo(-A, -0.6);
+  };
+  // ---- 洞門牆 (梯形，兩側斜邊接擋土牆)，石塊拼貼
+  const sh = new T.Shape(); sh.moveTo(-XB, -0.6); sh.lineTo(XB, -0.6); sh.lineTo(XT, TOP); sh.lineTo(-XT, TOP); sh.lineTo(-XB, -0.6);
+  { const hp = new T.Path(); arch(0, hp); sh.holes.push(hp); }
+  const wg = new T.ExtrudeGeometry(sh, { depth: 1.2, bevelEnabled: false, curveSegments: 2 }); wg.translate(0, 0, -1.2);
+  add(place(wg), ME.face);
+  // 中段凸出 (拱圈兩側到線腳)
+  { const cs = new T.Shape(), CW = a + 2.3; cs.moveTo(-CW, -0.6); cs.lineTo(CW, -0.6); cs.lineTo(CW, LEDGE); cs.lineTo(-CW, LEDGE); cs.lineTo(-CW, -0.6);
+    const hp = new T.Path(); arch(RIM - 0.05, hp); cs.holes.push(hp);
+    add(place(new T.ExtrudeGeometry(cs, { depth: 0.25, bevelEnabled: false, curveSegments: 2 })), ME.face); }
+  // 石框
+  { const rs = new T.Shape(); arch(RIM, rs); const hp = new T.Path(); arch(0, hp); rs.holes.push(hp);
+    add(place(new T.ExtrudeGeometry(rs, { depth: 0.45, bevelEnabled: false, curveSegments: 2 })), M.rim); }
+  // 橫線腳 + 下方小托架
+  const LW = XB + BAT * LEDGE / TOP;
+  add(place(new T.BoxGeometry(2 * LW, 0.28, 0.5).translate(0, LEDGE + 0.14, 0.25)), ME.ledge);
+  for (let x = -LW + 0.8; x < LW - 0.6; x += 2.2) add(place(new T.BoxGeometry(0.35, 0.4, 0.35).translate(x, LEDGE - 0.2, 0.18)), ME.ledge, false);
+  // 牆頂壓頂
+  add(place(new T.BoxGeometry(2 * XT, 0.22, 1.4).translate(0, TOP + 0.11, -0.5)), ME.ledge);
+  // 金字匾 (上段中央)
+  { const pw = 4.6, ph = pw / ((4 * 1.6 + 1) / 2), py = LEDGE + 0.55;
+    add(place(new T.BoxGeometry(pw + 0.12, ph + 0.12, 0.1).translate(0, py + ph / 2, 0.05)), M.rim, false);
+    quad([[-pw / 2, py, 0.11], [pw / 2, py, 0.11], [pw / 2, py + ph, 0.11], [-pw / 2, py + ph, 0.11]], UV1, ME.plaque); }
+  // ---- 欄杆 (鋼管: 立柱每 1.6 m，上下兩道橫桿)
+  const rail = (p0, p1) => {
+    const L = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]), n = Math.max(1, Math.round(L / 1.6));
+    const g = new GB();
+    for (const hh of [0.5, 1.05]) tube(g, [W(p0[0], p0[1] + hh, p0[2]), W(p1[0], p1[1] + hh, p1[2])], [0.035, 0.035], 6);
+    for (let k = 0; k <= n; k++) { const f = k / n, q = [p0[0] + (p1[0] - p0[0]) * f, p0[1] + (p1[1] - p0[1]) * f, p0[2] + (p1[2] - p0[2]) * f]; tube(g, [W(q[0], q[1], q[2]), W(q[0], q[1] + 1.1, q[2])], [0.03, 0.03], 5); }
+    grp.add(g.mesh(M.steel, { cast: true }));
+  };
+  rail([-XT, TOP + 0.22, -0.2], [XT, TOP + 0.22, -0.2]);
+  // ---- 兩側斜面擋土牆 (深灰石砌，往洞外斜降到路邊)
+  const run = 48;
+  for (const sg of [1, -1]) {
+    const A = [sg * XB, -0.6, 0], B2 = [sg * XT, TOP, 0], C = [sg * (XB + 1.4), 0.9, run], D = [sg * XB, -0.6, run];
+    const pts = sg > 0 ? [D, A, B2, C] : [A, D, C, B2];
+    quad(pts, pts.map((q) => [q[0] * sg + q[2], q[1]]), ME.wing, true);   // uv 用公尺 (貼圖本身 4 m 重複一次)
+    // 牆腳排水溝邊
+    add(place(new T.BoxGeometry(0.35, 0.25, run).translate(sg * (XB - 0.2), -0.48, run / 2)), ME.ledge, false);
+    // 牆頂草皮 (往外 10 m)
+    const G1 = [B2[0] + sg * 10, TOP + 3, -2], G2 = [C[0] + sg * 10, 3.2, run + 2], gp = sg > 0 ? [B2, G1, G2, C] : [G1, B2, C, G2];
+    quad(gp, gp.map((q) => [q[0] / 5, q[2] / 5]), M.grass);
+    if (sg > 0) rail(B2, C);   // 右側擋土牆頂的欄杆
+  }
+  // ---- 左側牆腳單臂路燈 (燈臂伸向路面)
+  { const lx = -(XB - 0.5), lz = 7, top = 9.6, g = new GB(), pts = [W(lx, -0.2, lz), W(lx, top, lz)];
+    tube(g, pts, [0.11, 0.07], 8);
+    const arm = []; for (let k = 0; k <= 8; k++) { const t = 1.3 * k / 8; arm.push(W(lx + 2.4 * (1 - Math.cos(t)), top + 2.4 * Math.sin(t) * 0.45, lz)); }
+    tube(g, arm, arm.map(() => 0.055), 6); grp.add(g.mesh(M.steel, { cast: true }));
+    add(place(new T.BoxGeometry(0.85, 0.16, 0.34).translate(lx + 2.4 * (1 - Math.cos(1.3)) + 0.35, top + 2.4 * Math.sin(1.3) * 0.45 - 0.05, lz)), M.rim, false); }
+  // ---- 洞門後方綠色草坡: 補地形在隧道口挖掉的洞 (跟北端洞門一樣)
+  { const BK = 36, FAR = 70, SIDE = 30, back = 18, rise = 6, xs = [], zs = [];
+    for (let x = -XT - SIDE; x < XT + SIDE + 0.1; x += 4) xs.push(Math.min(x, XT + SIDE));
+    for (let z = 0; z <= FAR; z += 4) zs.push(z);
+    const sm = (t) => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
+    const hAt = (sx, d) => {
+      const ramp = TOP + 0.25 + rise * Math.min(d, back) / back, q = W(sx, 0, -0.3 - d), tr = terrainAt(q[0], q[1]), ter = tr === 0 ? ramp : tr - z0 - 0.3;
+      const core = ramp + (ter - ramp) * sm((d - back * 0.6) / (BK - back * 0.6));
+      const wl = 1 - sm(Math.max(0, -XT - 2 - sx, sx - XT - 2) / 12);
+      return ter + (core - ter) * wl;
+    };
+    const g = new GB('uv'), ids = zs.map((d) => xs.map((x) => { const q = W(x, hAt(x, d), -0.3 - d); return g.vv([q[0], q[1], q[2], x / 5, d / 5]); }));
+    for (let j = 0; j < zs.length - 1; j++) for (let i = 0; i < xs.length - 1; i++) g.q(ids[j][i], ids[j][i + 1], ids[j + 1][i + 1], ids[j + 1][i]);
+    grp.add(withUv(g.mesh(M.grass, { cast: false }))); }
+  grp.userData = { x: E[0], y: E[1] };
   return grp;
 }
 
