@@ -2612,6 +2612,7 @@ const CATS = {
   drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matSoundPost, 1, 1, 'prop'],
   tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
   lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
+  wbeam: ['', () => matWBeam(), 1, 1, 'mid'], wpost: ['', () => matWBeam(), 1, 1, 'prop'], wrefl: ['', () => matWRefl(), 0, 1, 'fine'],
   hedge: ['uv', () => matLeaf, 1, 1, 'prop'], soil: ['', () => matSoil, 0, 1, 'prop'],
   kmface: ['uv', () => matKm(), 0, 1, 'prop'], exitface: ['uv', () => matExit(), 0, 1, 'mid'],
   tcab: ['', () => matCabinet, 0, 1, 'fine'], reflBlack: ['', () => matReflBlack, 0, 1, 'fine'], reflFace: ['uv', () => matRetro, 0, 0, 'fine'],
@@ -2965,6 +2966,42 @@ function shrub(g, x, y, z0, rh, rv, rnd) {
   }
 }
 
+// ======================================================================= W 形鋼板護欄 (照街景: 國 1 基隆段右側)
+// 鍍鋅鋼板 W 形斷面 (高 0.31 m、兩道凸肋)，H 型鋼立柱每 2 m 一支，立柱和鋼板之間一塊墊塊，每 3 支立柱頂上一個橘色圓形反光片
+var MAT_WBEAM = null;
+function matWBeam() { return MAT_WBEAM || (MAT_WBEAM = new T.MeshStandardMaterial({ color: new T.Color(0.6, 0.62, 0.64), metalness: 0.55, roughness: 0.42, side: T.DoubleSide })); }
+var MAT_WREFL = null;   // 橘色圓形反光片 (照街景)
+function matWRefl() { return MAT_WREFL || (MAT_WREFL = new T.MeshStandardMaterial({ color: new T.Color(0.95, 0.38, 0.06), emissive: new T.Color(0.35, 0.12, 0.02), roughness: 0.35, metalness: 0 })); }
+function keelungWay(w) { const mp = kmData().map[w.gid]; return !!mp && mp[0] === '國道1號' && mp[2] < 5000; }
+// W 斷面 [往路面的偏移, 高]
+const WB_PROF = [[0, 0.55], [0.03, 0.56], [0.085, 0.62], [0.045, 0.675], [0.02, 0.705], [0.045, 0.735], [0.085, 0.79], [0.03, 0.85], [0, 0.86]];
+function addGuardrail(B, w) {
+  setupShoulders(w);
+  const { P, nx, ny, s, n, hw, M } = w, ER = (i) => w.eR ? w.eR[i] : 0;
+  const face = (i) => -(hw + ER(i)) + 0.38;   // 鋼板面 (左法向偏移；右側為負)
+  const rail = new Strip(B, 'wbeam', WB_PROF.slice(0, -1).map((_, j) => [j, j + 1]));
+  for (let i = 0; i < n; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], f = face(i);
+    rail.add(WB_PROF.map(([o, h]) => [x + nx[i] * (f + o), y + ny[i] * (f + o), z + h]), i > 0 && !((M[i - 1] | M[i]) & 2));
+  }
+  let post = 0;
+  for (let d = 1, k = 0; d < s[n - 1]; d += 2, post++) {
+    const p = along(w, d, k); k = p.k;
+    if ((M[k] | M[Math.min(k + 1, n - 1)]) & 2) continue;
+    const f = face(k), tx = ny[k], ty = -nx[k], g = B.g('wpost', p.x, p.y);
+    const at = (off) => [p.x + nx[k] * (f + off), p.y + ny[k] * (f + off)];
+    const [bx, by] = at(-0.08), [qx, qy] = at(-0.24);
+    box(g, bx, by, tx, ty, 0.075, 0.075, p.z + 0.58, p.z + 0.84);                                 // 墊塊
+    box(g, qx, qy, tx, ty, 0.075, 0.006, p.z - 0.4, p.z + 0.8);                                    // H 型鋼: 腹板
+    for (const sd of [-1, 1]) { const [fx, fy] = at(-0.24 + sd * 0.05); box(g, fx, fy, tx, ty, 0.075, 0.005, p.z - 0.4, p.z + 0.8); }   // 翼板
+    if (post % 3 === 1) {   // 橘色圓形反光片: 立柱頂黑色小支架 + 圓片 (面向來車)
+      box(B.g('reflBlack', qx, qy), qx, qy, tx, ty, 0.025, 0.025, p.z + 0.8, p.z + 0.98);
+      disc(B.g('reflBlack', qx, qy), qx, qy, p.z + 1.07, tx, ty, 0.1, 0.03, 16);
+      disc(B.g('wrefl', qx, qy), qx - tx * 0.02, qy - ty * 0.02, p.z + 1.07, tx, ty, 0.085, 0.012, 16);
+    }
+  }
+}
+
 /** 國道外側路邊設施: 市區段的隔音牆 (實心綠色板、下段深綠上段淺綠、4 m 一根柱子) 與約每 1.2 km 一面廣告看板 */
 function roadside(B, w, oAt, inward) {
   const { nx, ny, hw, M } = w, L = w.len;
@@ -3107,6 +3144,8 @@ function addRoad(B, w) {
   // 紐澤西護欄 (左右；分合流處落在別條路面上的段落不放；隧道內是檢修步道，不放)
   if (!w.tunnel) for (const [edge, inward, bit] of [[hw, -1, 1], [-hw, 1, 2]]) {
     const o = edge + inward * BARRIER_INSET;
+    // 基隆段 (國 1 里程 5 km 內) 右側照實景是 W 形鋼板護欄 (橋上、隧道照舊混凝土護欄)
+    const wbeam = bit === 2 && !w.bridge && !w.link && keelungWay(w) && !params.has('nowbeam');
     // 護欄中心 (左法向偏移): 國道主線左邊 = 中央護欄 (w.bc)、右邊 = 加寬後路緣往內 0.35 m
     const oAt = (i) => w.bc ? (bit === 1 ? w.bc[i] : -(hw + ER(i)) + BARRIER_INSET) : o;
     // 共用的中央護欄 (左邊有對向路面) 只由 gid 小的那一條建
@@ -3120,7 +3159,8 @@ function addRoad(B, w) {
     for (let i = 0; i < n; i++) st.push([s[i], i]);
     for (const c of notch) for (const dd of [-BAR_NOTCH - BAR_RAMP, -BAR_NOTCH, BAR_NOTCH, BAR_NOTCH + BAR_RAMP]) { const d = c + dd; if (d > 0.05 && d < s[n - 1] - 0.05) st.push([d, -1]); }
     st.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
-    const segOk = (k) => !((M[k] | M[k + 1]) & bit) && !(notMine(k) && notMine(k + 1));
+    const segOk = (k) => !wbeam && !((M[k] | M[k + 1]) & bit) && !(notMine(k) && notMine(k + 1));
+    if (wbeam) addGuardrail(B, w);
     let k = 0;
     for (let q = 0; q < st.length; q++) {
       const [d, node] = st[q];
@@ -3188,7 +3228,7 @@ function addRoad(B, w) {
       }
     }
     // 反光片: 外側護欄每 24 m 一支 (黃色圓形稜鏡反光片)，反光面朝來車
-    if (bit === 2) for (let d = 12, k = 0; d < s[n - 1]; d += 24) {
+    if (bit === 2 && !wbeam) for (let d = 12, k = 0; d < s[n - 1]; d += 24) {
       const p = along(w, d, k); k = p.k;
       if ((M[k] | M[k + 1]) & bit) continue;
       const q = oPt(w, oAt, p);
@@ -3654,6 +3694,13 @@ function zhongxingPortal({ zw, dw }) {
         prev = [ia, ib];
       }
       const m = g.mesh(M.pave, { cast: false }); if (m) { withUv(m); grp.add(m); }
+      // 紀念柱: 分隔島上離洞口最遠、寬度還放得下台座 (直徑 11 m + 兩側護欄) 的地方
+      if (!params.has('nomonument')) for (let d = 70; d >= 16; d -= 2) {
+        const a2 = edge(zp[0], d, true), b2 = edge(dn[0], d, false);
+        if (Math.hypot(a2[0] - b2[0], a2[1] - b2[1]) < 12.6) continue;
+        grp.add(zxMonument((a2[0] + b2[0]) / 2, (a2[1] + b2[1]) / 2, (a2[2] + b2[2]) / 2 + 0.04, Xd));
+        break;
+      }
     }
   }
   // ---- 紅牌「隧道內禁止變換車道」: 中興方向右側路邊、洞口前 14 m
@@ -3795,6 +3842,110 @@ function zhongxingExitPortal(zw) {
     grp.add(withUv(g.mesh(M.grass, { cast: false }))); }
   grp.userData = { x: E[0], y: E[1] };
   return grp;
+}
+
+// ======================================================================= 國 1 基隆端分隔島紀念柱 (照 Google 街景 2024-05)
+// 實景: 白色大圓台座 (直徑約 10 m、上窄下寬) → 上層圓平台 + 一圈白色石欄杆 → 石柱 (華表，柱身浮雕盤龍)，
+// 柱上段一片橫向雲板，柱頂圓盤上金色梅花 (國道標誌)；總高約 21 m
+var ZXM_MAT = null;
+function zxmMats() {
+  if (ZXM_MAT) return ZXM_MAT;
+  const R = zxRand(91);
+  const stoneTex = zxTex(256, 256, (c, w, h) => {
+    c.fillStyle = '#e2e1dc'; c.fillRect(0, 0, w, h);
+    for (let i = 0; i < 400; i++) { const g = 200 + R() * 40; c.fillStyle = `rgba(${g | 0},${g | 0},${(g - 6) | 0},0.5)`; c.fillRect(R() * w, R() * h, 2 + R() * 6, 2 + R() * 6); }
+    for (let i = 0; i < 40; i++) { c.fillStyle = `rgba(90,92,85,${0.04 + R() * 0.06})`; c.fillRect(R() * w, R() * h, 2 + R() * 6, 20 + R() * 80); }
+  }, [1, 1]);
+  // 柱身盤龍浮雕: 斜向螺旋帶 + 鱗片 + 雲紋 (灰白，凹處較暗)
+  const dragon = zxTex(256, 1024, (c, w, h) => {
+    c.fillStyle = '#d6d5cf'; c.fillRect(0, 0, w, h);
+    for (let k = -4; k < 12; k++) {   // 龍身: 斜帶 (纏繞柱子)
+      const y0 = k * 160;
+      c.save(); c.beginPath(); c.moveTo(0, y0); c.lineTo(w, y0 + 120); c.lineTo(w, y0 + 190); c.lineTo(0, y0 + 70); c.closePath(); c.clip();
+      c.fillStyle = '#c4c3bc'; c.fillRect(0, y0 - 10, w, 220);
+      for (let yy = y0 - 20; yy < y0 + 210; yy += 12) for (let xx = (yy / 12 % 2) * 7; xx < w; xx += 14) {   // 鱗片
+        c.fillStyle = 'rgba(120,120,112,0.55)'; c.beginPath(); c.arc(xx, yy, 6.5, 0, Math.PI); c.fill();
+        c.fillStyle = 'rgba(245,245,240,0.6)'; c.beginPath(); c.arc(xx, yy - 1.5, 5, Math.PI, 0); c.fill();
+      }
+      c.restore();
+      c.strokeStyle = 'rgba(95,95,88,0.7)'; c.lineWidth = 3;
+      c.beginPath(); c.moveTo(0, y0); c.lineTo(w, y0 + 120); c.stroke(); c.beginPath(); c.moveTo(0, y0 + 70); c.lineTo(w, y0 + 190); c.stroke();
+    }
+    for (let i = 0; i < 70; i++) {   // 雲紋 (小漩渦)
+      const x = R() * w, y = R() * h, r = 8 + R() * 10;
+      c.strokeStyle = 'rgba(110,110,104,0.45)'; c.lineWidth = 2.5; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 1.6); c.stroke();
+      c.beginPath(); c.arc(x + r * 0.4, y, r * 0.5, Math.PI, Math.PI * 2.6); c.stroke();
+    }
+  }, [1, 3]);
+  const std = (o) => new T.MeshStandardMaterial(Object.assign({ roughness: 0.75, metalness: 0 }, o));
+  ZXM_MAT = {
+    white: std({ map: stoneTex, color: new T.Color(1, 1, 1) }), carved: std({ map: dragon, roughness: 0.8 }),
+    gold: std({ color: new T.Color(0.86, 0.66, 0.26), metalness: 0.85, roughness: 0.32 }),
+  };
+  return ZXM_MAT;
+}
+/** 紀念柱 (three 本地座標: x 橫向、y 上、z 朝來車)，放在資料座標 (x, y, z)，Xd = 本地 x 軸方向 */
+function zxMonument(x, y, z, Xd) {
+  const M = zxmMats(), g = new T.Group();
+  const lathe = (pts, mat, seg = 48) => { const m = new T.Mesh(new T.LatheGeometry(pts.map(([r, h]) => new T.Vector2(r, h)), seg), mat); m.castShadow = m.receiveShadow = true; g.add(m); return m; };
+  const box = (sx, sy, sz, px, py, pz, mat, ry = 0) => { const m = new T.Mesh(new T.BoxGeometry(sx, sy, sz), mat); m.position.set(px, py, pz); m.rotation.y = ry; m.castShadow = m.receiveShadow = true; g.add(m); return m; };
+  // ---- 白色大圓台座 (上窄下寬) + 兩層台階 + 上層平台
+  lathe([[0, -0.6], [5.5, -0.6], [5.5, 0.05], [5.25, 0.25], [4.75, 1.75], [4.55, 1.85], [0, 1.85]], M.white);
+  lathe([[0, 1.85], [3.9, 1.85], [3.9, 2.15], [3.55, 2.15], [3.55, 2.45], [0, 2.45]], M.white);
+  // ---- 平台外圈石欄杆: 望柱 + 欄板 + 扶手
+  const RB = 3.35, NP = 20;
+  for (let k = 0; k < NP; k++) {
+    const a = k / NP * Math.PI * 2, px = Math.cos(a) * RB, pz = Math.sin(a) * RB;
+    box(0.22, 1.05, 0.22, px, 2.45 + 0.52, pz, M.white, -a);
+    lathe([[0, 3.5], [0.14, 3.5], [0.14, 3.62], [0.08, 3.72], [0, 3.76]], M.white, 10).position.set(px, 0, pz);   // 柱頭
+    const a2 = (k + 0.5) / NP * Math.PI * 2, L = 2 * RB * Math.sin(Math.PI / NP) - 0.24;
+    box(L, 0.55, 0.1, Math.cos(a2) * RB, 2.45 + 0.42, Math.sin(a2) * RB, M.white, Math.PI / 2 - a2);   // 欄板
+  }
+  { const t = new T.Mesh(new T.TorusGeometry(RB, 0.07, 6, 64), M.white); t.rotation.x = Math.PI / 2; t.position.y = 3.38; t.castShadow = true; g.add(t); }   // 扶手
+  // ---- 柱座 (須彌座)
+  lathe([[0, 2.45], [1.45, 2.45], [1.45, 2.85], [1.2, 3.0], [1.05, 3.05], [1.05, 3.5], [1.25, 3.62], [1.25, 3.8], [0.82, 3.95], [0, 3.95]], M.white);
+  // ---- 柱身 (盤龍浮雕) + 上中下三道箍
+  { const shaft = new T.Mesh(new T.CylinderGeometry(0.58, 0.66, 13.6, 32, 1, true), M.carved); shaft.position.y = 3.95 + 6.8; shaft.castShadow = shaft.receiveShadow = true; g.add(shaft); }
+  for (const hy of [4.05, 10.6, 17.45]) { const t = new T.Mesh(new T.TorusGeometry(0.66, 0.09, 8, 32), M.white); t.rotation.x = Math.PI / 2; t.position.y = hy; t.castShadow = true; g.add(t); }
+  // ---- 雲板: 柱子上段橫穿一片雲朵形石板 (兩端捲雲，微微上翹)
+  {
+    const sh = new T.Shape(), W2 = 2.7;
+    sh.moveTo(-W2, 0.15);
+    sh.quadraticCurveTo(-W2 * 0.75, 0.75, -W2 * 0.45, 0.42); sh.quadraticCurveTo(-W2 * 0.25, 0.85, 0, 0.5);
+    sh.quadraticCurveTo(W2 * 0.25, 0.85, W2 * 0.45, 0.42); sh.quadraticCurveTo(W2 * 0.75, 0.75, W2, 0.15);
+    sh.quadraticCurveTo(W2 * 1.08, -0.25, W2 * 0.8, -0.3); sh.quadraticCurveTo(W2 * 0.55, -0.05, W2 * 0.35, -0.35);
+    sh.quadraticCurveTo(0, -0.1, -W2 * 0.35, -0.35); sh.quadraticCurveTo(-W2 * 0.55, -0.05, -W2 * 0.8, -0.3);
+    sh.quadraticCurveTo(-W2 * 1.08, -0.25, -W2, 0.15);
+    const geo = new T.ExtrudeGeometry(sh, { depth: 0.32, bevelEnabled: true, bevelThickness: 0.06, bevelSize: 0.05, bevelSegments: 2, curveSegments: 8 });
+    geo.translate(0, 0, -0.16);
+    const m = new T.Mesh(geo, M.white); m.position.y = 15.2; m.rotation.z = 0.12; m.castShadow = m.receiveShadow = true; g.add(m);
+  }
+  // ---- 柱頂: 圓盤 (承露盤) + 小柱座 + 金色梅花 (國道標誌，面向兩方向來車)
+  lathe([[0, 17.45], [0.7, 17.45], [1.05, 17.65], [1.05, 17.85], [0.85, 17.95], [0.45, 18.05], [0.45, 18.4], [0.6, 18.5], [0, 18.55]], M.white);
+  {
+    const sh = new T.Shape(), Rp = 0.9, N = 120;
+    for (let k = 0; k <= N; k++) { const t = k / N * Math.PI * 2 + Math.PI / 2, r = Rp * (0.74 + 0.26 * Math.pow(Math.abs(Math.cos(2.5 * (t - Math.PI / 2))), 0.7)); const px = Math.cos(t) * r, py = Math.sin(t) * r; k ? sh.lineTo(px, py) : sh.moveTo(px, py); }
+    const geo = new T.ExtrudeGeometry(sh, { depth: 0.22, bevelEnabled: true, bevelThickness: 0.05, bevelSize: 0.04, bevelSegments: 2, curveSegments: 4 });
+    geo.translate(0, 0, -0.11);
+    const m = new T.Mesh(geo, M.gold); m.position.y = 18.55 + Rp * 0.95; m.castShadow = true; g.add(m);
+    // 梅花兩面: 國道 1 號標誌 (金邊、綠色梅花、白色「1」)
+    const ct = zxTex(256, 256, (c, w, h) => {
+      c.clearRect(0, 0, w, h);
+      const pl = (k, col) => { c.fillStyle = col; c.beginPath(); for (let i = 0; i <= 120; i++) { const t = i / 120 * Math.PI * 2 + Math.PI / 2, r = w * 0.5 * k * (0.74 + 0.26 * Math.pow(Math.abs(Math.cos(2.5 * (t - Math.PI / 2))), 0.7)); const px = w / 2 + Math.cos(t) * r, py = h / 2 - Math.sin(t) * r; i ? c.lineTo(px, py) : c.moveTo(px, py); } c.closePath(); c.fill(); };
+      pl(0.97, '#d8ae4a'); pl(0.84, '#1d8f3a');
+      c.fillStyle = '#ffffff'; c.font = 'bold 150px Arial, Helvetica, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('1', w / 2, h / 2 + 8);
+    });
+    const dm = new T.MeshStandardMaterial({ map: ct, transparent: true, alphaTest: 0.3, roughness: 0.45, metalness: 0.1, emissiveMap: ct, emissive: new T.Color(0.15, 0.15, 0.15) });
+    for (const sd of [1, -1]) {
+      const dp = new T.Mesh(new T.PlaneGeometry(Rp * 2, Rp * 2), dm);
+      dp.position.set(0, 18.55 + Rp * 0.95, sd * 0.18); if (sd < 0) dp.rotation.y = Math.PI; g.add(dp);
+    }
+  }
+  g.position.set(x, z, -y);
+  g.rotation.y = Math.atan2(Xd[1], Xd[0]);
+  g.updateMatrixWorld(true);
+  g.traverse((o) => { o.updateMatrix(); o.matrixAutoUpdate = false; });
+  return g;
 }
 
 /** 隧道入口前的白色名牌 (照國道 3 號街景「安坑隧道 長 455 公尺」): 洞口前 40 m、右側路肩外、兩支柱子 */
