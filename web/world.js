@@ -857,6 +857,9 @@ function computeJoints(rec) {
 }
 function addJoints(B, list) {
   for (const j of list) {
+    // 基隆端: 路面高度改過，伸縮縫跟著貼到現在的路面 (壓縫判定也用同一個 j.z)
+    if (kzWeight(j.x, j.y) > 0 && !j.kz) { j.kz = true; const r = roadAt(j.x, j.y, j.z + 1, -2, 0); if (r) j.z = r.z; else j.skip = true; }
+    if (j.skip) continue;
     const nx = -j.ty, ny = j.tx, half = (j.hL + j.hR) / 2 - 0.25, off = (j.hL - j.hR) / 2, cx = j.x + nx * off, cy = j.y + ny * off;
     const st = B.g('jsteel', cx, cy), rb = B.g('jrubber', cx, cy);
     box(st, cx + j.tx * 0.17, cy + j.ty * 0.17, j.tx, j.ty, 0.12, half, j.z - 0.03, j.z + 0.012);
@@ -882,6 +885,7 @@ function crossedJoint(ax, ay, bx, by, z) {
 /** 橋墩 (前處理已避開下層道路): 柱子可能往側邊偏移，帽梁延伸過去撐住橋面 */
 function addPier(B, A, k) {
   let [x, y, tx, ty, offL, zg, top, capL, capR] = A.subarray(k * 9, k * 9 + 9);
+  if (kzWeight(x, y) > 0) { const r2 = roadAt(x, y, top + 0.5, -3, 1.0); if (r2 && r2.z < top - 1.0) return; }   // 基隆端: 路面降回地面，原本的橋墩不要了
   const nx = -ty, ny = tx, g = B.g('pier', x, y);
   box(g, x + nx * offL, y + ny * offL, tx, ty, 1.0, 1.25, zg - 1.0, top - 1.4);   // 柱
   // 國道路肩加寬後橋面變寬: 帽梁兩端跟著加長 (橋墩方向可能跟路線相反)
@@ -1404,14 +1408,14 @@ function zxMonument(x, y, z, Xd) {
     const geo = new T.ExtrudeGeometry(sh, { depth: 0.22, bevelEnabled: true, bevelThickness: 0.05, bevelSize: 0.04, bevelSegments: 2, curveSegments: 4 });
     geo.translate(0, 0, -0.11);
     const m = new T.Mesh(geo, M.gold); m.position.y = 18.55 + Rp * 0.95; m.castShadow = true; g.add(m);
-    // 梅花兩面: 國道 1 號標誌 (金邊、綠色梅花、白色「1」)
+    // 梅花兩面: 金色梅花上刻一個「1」(凹刻: 深金色字 + 右下亮邊，照實景)
     const ct = zxTex(256, 256, (c, w, h) => {
       c.clearRect(0, 0, w, h);
-      const pl = (k, col) => { c.fillStyle = col; c.beginPath(); for (let i = 0; i <= 120; i++) { const t = i / 120 * Math.PI * 2 + Math.PI / 2, r = w * 0.5 * k * (0.74 + 0.26 * Math.pow(Math.abs(Math.cos(2.5 * (t - Math.PI / 2))), 0.7)); const px = w / 2 + Math.cos(t) * r, py = h / 2 - Math.sin(t) * r; i ? c.lineTo(px, py) : c.moveTo(px, py); } c.closePath(); c.fill(); };
-      pl(0.97, '#d8ae4a'); pl(0.84, '#1d8f3a');
-      c.fillStyle = '#ffffff'; c.font = 'bold 150px Arial, Helvetica, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('1', w / 2, h / 2 + 8);
+      c.font = 'bold 150px Arial, Helvetica, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillStyle = '#f6dc8c'; c.fillText('1', w / 2 + 5, h / 2 + 13);   // 凹槽下緣反光
+      c.fillStyle = '#7a5a1c'; c.fillText('1', w / 2, h / 2 + 8);        // 刻痕 (暗)
     });
-    const dm = new T.MeshStandardMaterial({ map: ct, transparent: true, alphaTest: 0.3, roughness: 0.45, metalness: 0.1, emissiveMap: ct, emissive: new T.Color(0.15, 0.15, 0.15) });
+    const dm = new T.MeshStandardMaterial({ map: ct, transparent: true, alphaTest: 0.3, roughness: 0.4, metalness: 0.6 });
     for (const sd of [1, -1]) {
       const dp = new T.Mesh(new T.PlaneGeometry(Rp * 2, Rp * 2), dm);
       dp.position.set(0, 18.55 + Rp * 0.95, sd * 0.18); if (sd < 0) dp.rotation.y = Math.PI; g.add(dp);
@@ -1734,8 +1738,70 @@ function disposeObj(o) {
   o.traverse((q) => { if (q.geometry) q.geometry.dispose(); });
 }
 /** 一個細節分區的模型 (產生器: 每條路段之間可以暫停) */
+// ======================================================================= 國 1 基隆端 (港邊) 道路高度修正 (照 Google 街景)
+// 原始資料: 國 1 匝道縱斷面在港邊尾端只降到 17 m (地面約 9 m)，市區道路端點又會被拉到匝道高度 → 孝二路一帶疊成好幾層假高架。
+// 實景: 台 2 線 / 孝二路都是地面道路，頭頂只有標誌門架，匝道高架在前方遠處。
+// 修法 (只在港邊半徑 KZ.R 內，KZ.F 外完全不動，中間漸變):
+//  - 市區道路 (橋除外) 回到地面 (地形 + 0.25 m)
+//  - 國道匝道: 從接上市區道路的端點往回，最多以 KZ_GRADE 坡度往上爬 (尾端降到地面、遠處真正的高架照舊)
+const KZ = { x: 19034, y: 10995, R: 380, F: 480 }, KZ_GRADE = 0.065;
+function kzWeight(x, y) { const d = Math.hypot(x - KZ.x, y - KZ.y); return d < KZ.R ? 1 : d > KZ.F ? 0 : 1 - (d - KZ.R) / (KZ.F - KZ.R); }
+function kzGround(x, y) { const t = terrainAt(x, y); return t ? t + 0.25 : null; }
+/** 匝道接市區道路的端點 (港邊街道層) */
+function kzEnds() {
+  const out = [];
+  for (const w of WAYS) {
+    if (!w || w.city || !w.link) continue;
+    for (const e of [0, w.n - 1]) {
+      const x = w.P[e * 3], y = w.P[e * 3 + 1];
+      if (kzWeight(x, y) <= 0) continue;
+      // 真正的終點: 這個端點沒有接到其他國道 / 匝道 (只能接市區道路)；原始資料匝道接街道是「12 m 內就算」，不一定共用同一點
+      const fwyNext = (PT_INDEX.get(ptKey(x, y)) || []).some(([k]) => k !== w.k && WAYS[k] && !WAYS[k].city);
+      if (!fwyNext && cityNear(x, y, 15)) out.push([x, y]);
+    }
+  }
+  return out;
+}
+function cityNear(x, y, R) {
+  for (let cx = Math.floor((x - R) / CELL); cx <= Math.floor((x + R) / CELL); cx++) for (let cy = Math.floor((y - R) / CELL); cy <= Math.floor((y + R) / CELL); cy++) {
+    const a = GRID.get(cellKey(cx, cy)); if (!a) continue;
+    for (let j = 0; j < a.length; j += 2) { const o = WAYS[a[j]], i = a[j + 1]; if (o && o.city && Math.hypot(o.P[i * 3] - x, o.P[i * 3 + 1] - y) < R) return true; }
+  }
+  return false;
+}
+function kzFixWay(w) {
+  if (w.kzDone || w.tunnel || params.has('nokz')) return;
+  const [x0, y0, x1, y1] = w.bb, cx = Math.min(Math.max(KZ.x, x0), x1), cy = Math.min(Math.max(KZ.y, y0), y1);
+  if (Math.hypot(cx - KZ.x, cy - KZ.y) > KZ.F) { w.kzDone = true; return; }
+  if (w.city && w.bridge) { w.kzDone = true; return; }
+  const ends = w.city ? null : kzEnds();
+  if (ends && !ends.length) return;   // 港邊街道還沒載入: 之後再試
+  const P = w.P, nz = new Float32Array(w.n);
+  for (let i = 0; i < w.n; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], k = kzWeight(x, y);
+    nz[i] = z;
+    if (k <= 0) continue;
+    const g = kzGround(x, y);
+    if (g == null) return;             // 地形還沒載入: 之後再試
+    if (w.city) nz[i] = z + (g - z) * k;
+    else {
+      let dm = 1e9; for (const [ex, ey] of ends) dm = Math.min(dm, Math.hypot(ex - x, ey - y));
+      const cap = g + KZ_GRADE * dm;
+      if (cap < z) nz[i] = z + (cap - z) * k;
+    }
+  }
+  for (let i = 0; i < w.n; i++) P[i * 3 + 2] = nz[i];
+  w.kzDone = true;
+}
+
 function* buildTile(rec) {
   const B = new Build();
+  // 建模前先修高度 (路面、護欄、物理都用同一份)；港邊街道 / 地形資料還沒到齊就等一下 (最多約 10 秒)，不然會用舊高度建出浮空的路面
+  for (let tries = 0; tries < 600; tries++) {
+    for (const k of rec.ways) kzFixWay(WAYS[k]);
+    if (rec.ways.every((k) => WAYS[k].kzDone || WAYS[k].tunnel || params.has('nokz'))) break;
+    yield;
+  }
   for (const k of rec.ways) {
     const w = WAYS[k];
     if (w.city) { if (!params.has('nocr')) addCityRoad(B, w); }
