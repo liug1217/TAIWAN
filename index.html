@@ -1710,6 +1710,7 @@ const CATS = {
   drum: ['', () => matDrum, 1, 1, 'prop'], drumb: ['', () => matDrumBand, 0, 1, 'prop'], spost: ['', () => matSoundPost, 1, 1, 'prop'],
   tlight: ['', () => matTunnelLight, 0, 0, 'prop'], jsteel: ['', () => matJointSteel, 0, 1, 'prop'], jrubber: ['', () => matJointRubber, 0, 1, 'prop'],
   lampPole: ['', () => matLampPole, 1, 1, 'lamp'], lampHead: ['', () => matLampHead, 0, 1, 'lamp'],
+  kzxover: ['uv', () => matKzXover(), 0, 1, 'mid'], kzxfill: ['uv', () => matKzXfill(), 0, 1, 'mid'], kzbollard: ['', () => matKzBollard(), 1, 1, 'prop'],
   kzmarker: ['uv', () => matKzMarker(), 0, 1, 'prop'], kzhedgeC: ['', () => matKzHedgeC(), 1, 1, 'prop'],
   kzpalm: ['uv', () => matPalm(), 1, 1, 'prop'], kzpalmT: ['', () => matPalmTrunk(), 1, 1, 'prop'],
   kzpost: ['', () => matKzPost(), 1, 1, 'mid'], kzgrass: ['', () => matKzGrass(), 0, 1, 'mid'],
@@ -2207,6 +2208,7 @@ function edgeGap(w, i, side) {
   return best;
 }
 function addRoad(B, w) {
+  if (w.gid === 1242 && !params.has('nokzside')) return;   // 中興洞口前的緊急連絡道: 照街景是分隔帶上的黃色斜線鋪面 (kzxover)，不另外畫路面/護欄
   setupShoulders(w);
   const { P, nx, ny, s, n, hw, M } = w;
   const EL = (i) => w.eL ? w.eL[i] : 0, ER = (i) => w.eR ? w.eR[i] : 0, PR = (i) => !!(w.pair && w.pair[i]);
@@ -2230,7 +2232,7 @@ function addRoad(B, w) {
     if (sb) sb.add([[lx, ly, z - depth], [rx, ry, z - depth]]);
   }
   // 分岔 / 匯流楔形空隙: 兩條路各補一半 (混凝土鋪面，跟路面同高)，蓋住底下的側牆
-  const kzLink = !w.city && w.link && !params.has('nokzside') && (kzWeight(P[0], P[1]) > 0 || kzWeight(P[(n - 1) * 3], P[(n - 1) * 3 + 1]) > 0);
+  const kzLink = !w.city && !params.has('nokzside') && ((w.link && (kzWeight(P[0], P[1]) > 0 || kzWeight(P[(n - 1) * 3], P[(n - 1) * 3 + 1]) > 0)) || KZ_APP.has(w.gid));
   if (!w.tunnel && !w.city && !kzLink && !params.has('nofill')) for (const side of [1, -1]) {
     const bit = side > 0 ? 1 : 2, fs = new Strip(B, 'skirt', [[0, 1]]);
     let prev = false;
@@ -2250,7 +2252,7 @@ function addRoad(B, w) {
     const o = edge + inward * BARRIER_INSET;
     // 基隆段 (國 1 里程 5 km 內) 右側照實景是 W 形鋼板護欄 (橋上、隧道照舊混凝土護欄)
     const wbeam = bit === 2 && !w.bridge && !w.link && keelungWay(w) && !params.has('nowbeam');
-    const kzL = !w.city && w.link && !params.has('nokzside') && (kzWeight(P[0], P[1]) > 0 || kzWeight(P[(n - 1) * 3], P[(n - 1) * 3 + 1]) > 0);
+    const kzL = kzLink;
     const kzNb = kzL ? kzSameSide(w, bit) : null;   // 每點: 這一側緊貼同向匝道的槽化區中心 (左法向偏移)，沒有 = NaN
     // 護欄中心 (左法向偏移): 國道主線左邊 = 中央護欄 (w.bc)、右邊 = 加寬後路緣往內 0.35 m
     const oAt = (i) => w.bc ? (bit === 1 ? w.bc[i] : -(hw + ER(i)) + BARRIER_INSET) : o;
@@ -3456,14 +3458,16 @@ function matKzHatch(yellow) {
   return (MAT_KZHATCH[yellow] = new T.MeshStandardMaterial({ map: t, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
 }
 /** 每點: 這一側 (bit 1 左 / 2 右) 7 m 內有同高度、平行的匝道 (同向或對向) → 槽化區中心的左法向偏移，否則 NaN；out.opp = 對向 */
+/** 國 1 基隆端: 0K 到中興 / 大業洞口的兩段引道 (不是匝道)，照街景也是綠化島 + 鋼管護欄 + 隔音牆 */
+var KZ_APP = new Set([1158, 1141, 1159, 1160]), KZ_PORTAL = [18660.8, 10324.6];
 function kzSameSide(w, bit) {
   setupShoulders(w);
   const { P, nx, ny, n, hw } = w, sd = bit === 1 ? 1 : -1, out = new Float32Array(n).fill(NaN);
   for (let i = 0; i < n; i++) {
     const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], tx = ny[i], ty = -nx[i], e = hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0));
-    for (let d = 0.3; d <= 7; d += 0.35) {
+    for (let d = 0.3, dm = KZ_APP.has(w.gid) ? 40 : 7; d <= dm; d += 0.35) {
       const r = roadAt(x + nx[i] * sd * (e + d), y + ny[i] * sd * (e + d), z + 1, 0, 1.5);
-      if (!r || r.w === w) continue;
+      if (!r || r.w === w || r.w.gid === 1242) continue;   // 緊急連絡道 (不畫) 穿過分隔帶，略過繼續找對面
       const dot = r.tx * tx + r.ty * ty;
       if (!r.w.city && Math.abs(r.z - z) < 1.2 && Math.abs(dot) > 0.8) { out[i] = sd * (e + d / 2); if (dot < 0) out.opp = true; }   // 對向: 黃色斜線
       break;
@@ -3475,10 +3479,18 @@ function kzSameSide(w, bit) {
 function kzSideDeco(B, w, bit, nb, oAt) {
   const { P, nx, ny, s, n, hw } = w, sd = bit === 1 ? 1 : -1;
   // 槽化區 (斜線) + 橘色導桿: 兩條匝道各鋪自己這一半，導桿只由 gid 小的那條放
-  const hatch = new Strip(B, nb.opp ? 'kzhatchY' : 'kzhatch', [[0, 1]]);
+  const hatch = new Strip(B, nb.opp ? 'kzhatchY' : 'kzhatch', [[0, 1]]), xov = new Strip(B, 'kzxover', [[0, 1]]);
   for (let i = 0; i < n; i++) {
     const c = nb[i], ok = i > 0 && !isNaN(c) && !isNaN(nb[i - 1]);
-    if (isNaN(c)) { hatch.add([[0, 0, 0], [0, 0, 0]], false); continue; }
+    if (isNaN(c)) { hatch.add([[0, 0, 0], [0, 0, 0]], false); xov.add([[0, 0, 0], [0, 0, 0]], false); continue; }
+    if (kzXover(P[i * 3], P[i * 3 + 1])) {
+      const e = sd * (hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0))), x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2] + 0.014 + (w.gid % 2) * 0.004, cc = c + sd * 0.06;
+      const a = [x + nx[i] * e, y + ny[i] * e, z, Math.abs(e - c), s[i]], b = [x + nx[i] * cc, y + ny[i] * cc, z, 0, s[i]];
+      xov.add(sd > 0 ? [b, a] : [a, b], ok && kzXover(P[(i - 1) * 3], P[(i - 1) * 3 + 1]));
+      hatch.add([[0, 0, 0], [0, 0, 0]], false);
+      continue;
+    }
+    xov.add([[0, 0, 0], [0, 0, 0]], false);
     const e = sd * (hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0))), x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2] + 0.012;
     if (kzIsland(w, nb, i)) { hatch.add([[0, 0, 0], [0, 0, 0]], false); continue; }
     const cc = 2 * c - e + sd * 0.25, a = [x + nx[i] * e, y + ny[i] * e, z, e, s[i]], b = [x + nx[i] * cc, y + ny[i] * cc, z, cc, s[i]];   // 鋪滿整個分隔帶到對面路緣 (兩條各鋪一次，不會有縫看到底下的側牆)
@@ -3488,7 +3500,7 @@ function kzSideDeco(B, w, bit, nb, oAt) {
   const off = (w.gid % 2) ? 1 : 2;
   for (let d = off, k = 0; d < s[n - 1]; d += 2) {
     const p = along(w, d, k); k = p.k;
-    if (isNaN(nb[k]) || isNaN(nb[Math.min(k + 1, n - 1)]) || kzIsland(w, nb, k)) continue;
+    if (isNaN(nb[k]) || isNaN(nb[Math.min(k + 1, n - 1)]) || kzIsland(w, nb, k) || kzXover(p.x, p.y)) continue;
     const c = nb[k] - sd * 0.22, x = p.x + nx[k] * c, y = p.y + ny[k] * c, tx = ny[k], ty = -nx[k];
     box(B.g('reflBlack', x, y), x, y, tx, ty, 0.09, 0.09, p.z, p.z + 0.05);                              // 底座
     tube(B.g('gpost', x, y), [[x, y, p.z + 0.04], [x, y, p.z + 0.86]], [0.045, 0.032], 8);              // 橘色桿 (往上漸細)
@@ -3499,8 +3511,30 @@ function kzSideDeco(B, w, bit, nb, oAt) {
   kzOuterWall(B, w, bit, nb);
 }
 /** 這一點的分隔帶夠寬 (>= 2.5 m) → 綠化島 (照街景: 混凝土路緣 + 草地 + 棕櫚樹 + 長方形綠籬) */
+/** 照街景: 綠化島在中興洞口前約 90 m 結束 (圓弧島頭)，接著是一段黃色斜線鋪面 (緊急連絡道穿越)，再接紀念碑廣場 */
+function kzXover(x, y) { return y < 10431 && y > 10398 && x > 18650 && x < 18745; }
+/** 緊急連絡道區: 四條路 (南下 1159/1158、北上 1160/1141) 在區內的中心點取凸包，整片鋪柏油+黃線 (比路面低 5 cm，只在分隔帶露出來) */
+function kzXoverFill(B) {
+  const pts = [];
+  for (const g of [1159, 1158, 1160, 1141]) {
+    const w = WAYS.find((q) => q && q.gid === g); if (!w) return;
+    for (let d = 0, k = 0; d <= w.s[w.n - 1]; d += 1.5) { const p = along(w, d, k); k = p.k; if (p.y < 10433 && p.y > 10396) pts.push([p.x, p.y, p.z]); }
+  }
+  if (pts.length < 3) return;
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], up = [];
+  for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  const hull = lo.slice(0, -1).concat(up.slice(0, -1));
+  const cx = hull.reduce((a, p) => a + p[0], 0) / hull.length, cy = hull.reduce((a, p) => a + p[1], 0) / hull.length, cz = hull.reduce((a, p) => a + p[2], 0) / hull.length;
+  const g = B.g('kzxfill', cx, cy), c0 = g.vv([cx, cy, cz - 0.06, cx * 0.8, cy * 0.8]);
+  const vs = hull.map((p) => g.vv([p[0], p[1], p[2] - 0.06, p[0] * 0.8, p[1] * 0.8]));
+  for (let i = 0; i < vs.length; i++) { const j = (i + 1) % vs.length; g.q(c0, vs[i], vs[j], vs[j]); }   // 凸包逆時針 (資料座標) → 法線朝上
+}
 function kzIsland(w, nb, i) {
   const c = nb[i]; if (isNaN(c)) return false;
+  if (kzXover(w.P[i * 3], w.P[i * 3 + 1])) return false;
   // 照街景: 港邊門架往南約 30 m (y < 10540) 開始中間是綠化島 (OSM 兩條匝道這裡只隔約 2 m，實際約 4~5 m)
   if (w.P[i * 3 + 1] < 10540 && w.P[i * 3 + 1] > 10380) return true;
   const sd = c > 0 ? 1 : -1, e = sd * (w.hw + (sd > 0 ? (w.eL ? w.eL[i] : 0) : (w.eR ? w.eR[i] : 0)));
@@ -3542,7 +3576,7 @@ function kzIslandDeco(B, w, bit, nb) {
   // 綠籬 (長方體，長約 4.4 m、寬 1.1 m、高 0.8 m)，每 6 m 一段；棕櫚每 12 m 一棵，種在綠籬之間的空隙
   for (let d = 3, k = 0; d + 2.5 < s[n - 1]; d += 6) {
     const q = along(w, d, k); k = q.k;
-    if (!isl(q.k) || !isl(Math.min(q.k + 1, n - 1))) continue;
+    if (!isl(q.k) || !isl(Math.min(q.k + 1, n - 1)) || Math.hypot(q.x - KZ_PORTAL[0], q.y - KZ_PORTAL[1]) < 24) continue;
     const c2 = nb[q.k], hxc = q.x + nx[q.k] * c2, hyc = q.y + ny[q.k] * c2, hz0 = q.z + 0.2, ux = ny[q.k], uy = -nx[q.k], wx = -uy, wy = ux;
     box(B.g('kzhedgeC', hxc, hyc), hxc, hyc, ux, uy, 2.15, 0.48, hz0, hz0 + 0.72);
     const hg = B.g('hedge', hxc, hyc);
@@ -3550,7 +3584,7 @@ function kzIslandDeco(B, w, bit, nb) {
   }
   for (let d = 6, k = 0; d < s[n - 1]; d += 12) {
     const p = along(w, d, k); k = p.k;
-    if (!isl(k) || !isl(Math.min(k + 1, n - 1))) continue;
+    if (!isl(k) || !isl(Math.min(k + 1, n - 1)) || Math.hypot(p.x - KZ_PORTAL[0], p.y - KZ_PORTAL[1]) < 24) continue;
     const c = nb[k], x = p.x + nx[k] * c, y = p.y + ny[k] * c, z = p.z + 0.2;
     {   // 棕櫚樹: 粗幹 (底部最粗) + 16 片下垂的羽狀葉
       const H = 2.8 + rnd() * 0.9;
@@ -3566,20 +3600,63 @@ function kzIslandDeco(B, w, bit, nb) {
       }
     }
   }
+  // 緊急連絡道段的黃色短樁 (照街景: 斜線區中線上一排)
+  {
+    let first = true;
+    for (let d = 0, k = 0; d < s[n - 1]; d += 1.6) {
+      const p = along(w, d, k); k = p.k;
+      if (isNaN(nb[k]) || !kzXover(p.x, p.y)) continue;
+      const xm = p.x + nx[k] * nb[k], ym = p.y + ny[k] * nb[k];
+      if (Math.abs(ym - 10410) > 4.5) continue;
+      first = false;
+      tube(B.g('kzbollard', xm, ym), [[xm, ym, p.z], [xm, ym, p.z + 0.75]], [0.07, 0.065], 10);
+      for (const h of [0.5, 0.62]) tube(B.g('gband', xm, ym), [[xm, ym, p.z + h], [xm, ym, p.z + h + 0.05]], [0.072, 0.072], 10);
+    }
+  }
   // 島頭 (兩端) 黃黑斜紋警示牌 + 灰色短柱，面向來車
   for (const i0 of [0, n - 1]) {
     let i = -1;
     if (i0 === 0) { for (let t = 0; t < n; t++) if (isl(t)) { i = t; break; } }
     else { for (let t = n - 1; t >= 0; t--) if (isl(t)) { i = t; break; } }
-    if (i < 0) continue;
+    if (i < 0 || i === 0 || i === n - 1) continue;   // 島接到下一段路繼續 (不是真的島頭) → 不放
     const c = nb[i], tx = ny[i], ty = -nx[i], dir = i0 === 0 ? 1 : -1, x = P[i * 3] + nx[i] * c + tx * dir * 0.6, y = P[i * 3 + 1] + ny[i] * c + ty * dir * 0.6, z = P[i * 3 + 2] + 0.2;
+    {   // 圓弧島頭: 半圓路緣 + 草地
+      const ex = P[i * 3] + nx[i] * c, ey = P[i * 3 + 1] + ny[i] * c, R = Math.max(0.8, Math.abs(c - edge(i)) - 0.05), ox = -tx * dir, oy = -ty * dir, qx = nx[i], qy = ny[i];
+      const gg = B.g('kzgrass', ex, ey), cg = B.g('skirt', ex, ey), N = 12;
+      const ctr = gg.v(ex, ey, z + 0.005), ctr2 = gg.v(ex, ey, z + 0.005);
+      let prv = null, prv2 = null;
+      for (let k = 0; k <= N; k++) {
+        const t = -Math.PI / 2 + Math.PI * k / N, ux = qx * Math.sin(t) + ox * Math.cos(t), uy = qy * Math.sin(t) + oy * Math.cos(t);
+        const px = ex + ux * (R - 0.3), py = ey + uy * (R - 0.3), vi = gg.v(px, py, z + 0.005), vi2 = gg.v(px, py, z + 0.005);   // 兩面各自的頂點 (法線不互相抵消)
+        if (prv !== null) { gg.q(ctr, prv, vi, vi); gg.q(ctr2, vi2, prv2, prv2); }
+        prv = vi; prv2 = vi2;
+        if (k < N) {
+          const t2 = t + Math.PI / N / 2, mx = qx * Math.sin(t2) + ox * Math.cos(t2), my = qy * Math.sin(t2) + oy * Math.cos(t2), cx = ex + mx * (R - 0.15), cy = ey + my * (R - 0.15);
+          box(cg, cx, cy, -my, mx, R * Math.PI / N / 2 + 0.03, 0.15, z - 0.2, z + 0.02);
+        }
+      }
+    }
     box(B.g('wpost', x, y), x, y, tx, ty, 0.04, 0.04, z, z + 1.25);
     const g = B.g('kzmarker', x, y), b0 = g.n, wx = -ty * 0.16, wy = tx * 0.16, fx = -tx * dir * 0.05, fy = -ty * dir * 0.05;
     for (const [vx, vy, vz, u, v] of [[x - wx + fx, y - wy + fy, z + 0.35, 0, 0], [x + wx + fx, y + wy + fy, z + 0.35, 1, 0], [x + wx + fx, y + wy + fy, z + 1.3, 1, 1], [x - wx + fx, y - wy + fy, z + 1.3, 0, 1]]) g.vv([vx, vy, vz, u, v]);
     g.q(b0, b0 + 1, b0 + 2, b0 + 3);
   }
 }
-var MAT_KZMARKER = null, MAT_KZHEDGEC = null;
+var MAT_KZMARKER = null, MAT_KZHEDGEC = null, MAT_KZXOVER = null, MAT_KZBOLL = null;
+/** 緊急連絡道段鋪面: 柏油 + 平行於行車方向的密集黃線 (u = 離分隔中心距離 m) */
+function matKzXover() {
+  if (MAT_KZXOVER) return MAT_KZXOVER;
+  const cv = document.createElement('canvas'); cv.width = 128; cv.height = 128; const c = cv.getContext('2d');
+  c.fillStyle = '#58585a'; c.fillRect(0, 0, 128, 128);
+  for (let k = 0; k < 90; k++) { const g = 70 + Math.random() * 30; c.fillStyle = `rgba(${g},${g},${g - 2},0.5)`; c.fillRect(Math.random() * 128, Math.random() * 128, 2, 2); }
+  c.fillStyle = '#d9b43a'; c.fillRect(0, 0, 22, 128); c.fillRect(106, 0, 22, 128);   // 黃線置中於 u = 0 (對稱，兩條路接得起來)
+  for (let k = 0; k < 60; k++) { c.fillStyle = 'rgba(88,88,90,0.6)'; c.fillRect(Math.random() * 128, Math.random() * 128, 3, 2); }   // 磨損
+  const t = new T.CanvasTexture(cv); t.colorSpace = T.SRGBColorSpace; t.wrapS = t.wrapT = T.RepeatWrapping; t.repeat.set(1 / 0.55, 1 / 3); t.anisotropy = 8;
+  return (MAT_KZXOVER = new T.MeshStandardMaterial({ map: t, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+}
+var MAT_KZXFILL = null;
+function matKzXfill() { if (MAT_KZXFILL) return MAT_KZXFILL; const m = matKzXover().clone(); m.polygonOffset = false; return (MAT_KZXFILL = m); }   // 補洞用 (比路面低，不能有 polygonOffset 蓋到路面)
+function matKzBollard() { return MAT_KZBOLL || (MAT_KZBOLL = new T.MeshStandardMaterial({ color: new T.Color(0.85, 0.62, 0.05), roughness: 0.5 })); }
 /** 黃黑斜紋警示牌 (雙面) */
 function matKzMarker() {
   if (MAT_KZMARKER) return MAT_KZMARKER;
@@ -3786,6 +3863,7 @@ function* buildTile(rec) {
     yield;
   }
   for (let k = 0; k < rec.piers.length / 9; k++) addPier(B, rec.piers, k);
+  if (!params.has('nokzside') && rec.ways.some((k) => WAYS[k].gid === 1158)) kzXoverFill(B);   // 中興洞口前緊急連絡道的鋪面 (補兩條路之間的空隙)
   if (!params.has('nokzg') && rec.ways.some((k) => WAYS[k].gid === KZG.gid)) { const m = kzGantry(); B.chunk(m.userData.x, m.userData.y).extra.push(m); }   // 基隆端港邊門架 (照街景)
   addJoints(B, rec.joints);
   yield;
@@ -3797,7 +3875,7 @@ function* buildTile(rec) {
       const [, mat, cast, recv, kind] = CATS[cat];
       let m = gb.mesh(mat(), { cast: false, receive: !!recv });
       if (!m) continue;
-      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface' || cat === 'hedge' || cat === 'kzhatch' || cat === 'kzhatchY' || cat === 'kzlouver' || cat === 'kzwall' || cat === 'kzpalm' || cat === 'kzmarker') withUv(m);
+      if (cat === 'bboard' || cat === 'kmface' || cat === 'exitface' || cat === 'hedge' || cat === 'kzhatch' || cat === 'kzhatchY' || cat === 'kzlouver' || cat === 'kzwall' || cat === 'kzpalm' || cat === 'kzmarker' || cat === 'kzxover' || cat === 'kzxfill') withUv(m);
       g.add(m); ch.meshes.push(m); ch.kinds.push(kind); ch.casts.push(!!cast);
       yield;   // 每個網格 (算法向量、建緩衝) 分開做，不要一個小塊全部擠在同一幀 (卡頓)
     }
@@ -5197,7 +5275,7 @@ setTimeout(async () => {
   }
   if (params.has('t')) await ensureArea(S.x, S.y);
   syncCar(0); updateCamera(1); updateDayNight(0);
-  if (!params.has('t')) { setStatus('準備畫面…'); await warmShaders(camera); }   // 著色器先編譯好，開車途中不會卡
+  if (!params.has('t') && !(params.has('bgtick') && document.hidden)) { setStatus('準備畫面…'); await warmShaders(camera); }   // 著色器先編譯好，開車途中不會卡
   $('loading').classList.add('hidden');
   let last = performance.now(), frame = 0;
   // ?hitch: 每 10 秒印出每幀各部分的平均 / 最長時間 (找卡頓用)
@@ -5223,9 +5301,11 @@ setTimeout(async () => {
         HP.acc = {}; HP.t0 = performance.now(); HP.frames = 0; HP.long = 0; HP.worst = 0;
       }
     }
-    requestAnimationFrame(loop);
+    RAF(loop);
   }
-  requestAnimationFrame(loop);
+  // 測試: ?bgtick 分頁被遮住 (hidden) 時也繼續跑 (MessageChannel 不被節流)，方便自動截圖比對
+  const RAF = params.has('bgtick') ? (f) => { if (!document.hidden) return requestAnimationFrame(f); const ch = new MessageChannel(); ch.port1.onmessage = () => f(performance.now()); ch.port2.postMessage(0); } : requestAnimationFrame;
+  RAF(loop);
 }, 30);
 })();
 </script>

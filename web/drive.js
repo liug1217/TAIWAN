@@ -897,7 +897,7 @@ setTimeout(async () => {
   }
   if (params.has('t')) await ensureArea(S.x, S.y);
   syncCar(0); updateCamera(1); updateDayNight(0);
-  if (!params.has('t')) { setStatus('準備畫面…'); await warmShaders(camera); }   // 著色器先編譯好，開車途中不會卡
+  if (!params.has('t') && !(params.has('bgtick') && document.hidden)) { setStatus('準備畫面…'); await warmShaders(camera); }   // 著色器先編譯好，開車途中不會卡
   $('loading').classList.add('hidden');
   let last = performance.now(), frame = 0;
   // ?hitch: 每 10 秒印出每幀各部分的平均 / 最長時間 (找卡頓用)
@@ -923,8 +923,10 @@ setTimeout(async () => {
         HP.acc = {}; HP.t0 = performance.now(); HP.frames = 0; HP.long = 0; HP.worst = 0;
       }
     }
-    requestAnimationFrame(loop);
+    RAF(loop);
   }
-  requestAnimationFrame(loop);
+  // 測試: ?bgtick 分頁被遮住 (hidden) 時也繼續跑 (MessageChannel 不被節流)，方便自動截圖比對
+  const RAF = params.has('bgtick') ? (f) => { if (!document.hidden) return requestAnimationFrame(f); const ch = new MessageChannel(); ch.port1.onmessage = () => f(performance.now()); ch.port2.postMessage(0); } : requestAnimationFrame;
+  RAF(loop);
 }, 30);
 })();
